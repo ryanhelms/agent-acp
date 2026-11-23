@@ -1,0 +1,52 @@
+[
+  {
+    "operation": "ReadHistory",
+    "request": {"session": {"harnessInstance": "remote", "sessionId": "same-id"}, "limit": 1},
+    "replies": [{
+      "observations": [{
+        "session": {"harnessInstance": "remote", "sessionId": "same-id"}, "cursor": "previous",
+        "turnId": "history-turn", "input": {"requestId": "historical", "prompt": "An old decision"}
+      }],
+      "nextCursor": "opaque/page+2=="
+    }]
+  },
+  {
+    "operation": "Open",
+    "request": {"harnessInstance": "local", "workingDirectory": "/tmp/with a space"},
+    "replies": [{"session": {"ref": {"harnessInstance": "local", "sessionId": "same-id"}, "capabilities": {"canAnswer": true, "canInterrupt": true}}}]
+  },
+  {
+    "operation": "Send",
+    "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "operationId": "send-1", "text": "  Check `$HOME` and \"a b\".\n\tThen stop.\n"},
+    "replies": [{"receipt": {"operationId": "send-1", "status": "DELIVERY_STATUS_ACCEPTED"}}]
+  },
+  {
+    "operation": "Observe",
+    "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "afterCursor": "start"},
+    "replies": [
+      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c1", "turnId": "t1", "text": {"speaker": "SPEAKER_ASSISTANT", "text": "Ready."}},
+      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c2", "turnId": "t1", "input": {"requestId": "active", "prompt": "Continue?", "choices": [{"id": "once", "label": "Once"}]}},
+      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c3", "turnId": "t1", "extension": {"type": "example/extra", "mediaType": "application/octet-stream", "data": "AAH/"}}
+    ]
+  },
+  {
+    "operation": "Answer",
+    "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "operationId": "answer-1", "requestId": "active", "optionId": "once"},
+    "replies": [{"receipt": {"operationId": "answer-1", "status": "DELIVERY_STATUS_DELIVERED"}}]
+  },
+  {
+    "operation": "Interrupt",
+    "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "operationId": "interrupt-1", "turnId": "t1"},
+    "replies": [{"receipt": {"operationId": "interrupt-1", "status": "DELIVERY_STATUS_UNKNOWN"}}]
+  },
+  {
+    "operation": "ListSessions",
+    "request": {"harnessInstance": "remote", "cursor": "opaque/+=", "limit": 5},
+    "replies": [{"sessions": [{"ref": {"harnessInstance": "remote", "sessionId": "same-id"}, "displayName": "Planning"}]}]
+  },
+  {
+    "operation": "Resume",
+    "request": {"session": {"harnessInstance": "remote", "sessionId": "same-id"}},
+    "replies": [{"session": {"ref": {"harnessInstance": "remote", "sessionId": "same-id"}, "capabilities": {"canResume": true}}}]
+  }
+]

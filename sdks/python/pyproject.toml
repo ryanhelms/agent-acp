@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-acp"
+version = "0.0.0"
+description = "Provider-neutral sessions for coding agents"
+requires-python = ">=3.10"
+dependencies = ["protobuf>=7.36.2,<8"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentacp", "agentacp.*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+agentacp = ["py.typed"]
+"agentacp.v1" = ["*.pyi"]

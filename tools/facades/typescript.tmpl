@@ -1,0 +1,30 @@
+// Code generated from $source. DO NOT EDIT.
+
+import type { DescMessage, Message, MessageShape } from "@bufbuild/protobuf";
+import * as model from "$model_import";
+
+export * from "$model_import";
+
+/** Adapters implement portable session operations and honor caller cancellation. */
+export interface Runtime {
+  unary<O extends DescMessage>(
+    operation: string,
+    request: Message,
+    output: O,
+    signal?: AbortSignal,
+  ): Promise<MessageShape<O>>;
+
+  /** The iterator releases its subscription on return, completion or failure. */
+  stream<O extends DescMessage>(
+    operation: string,
+    request: Message,
+    output: O,
+    signal?: AbortSignal,
+  ): AsyncIterable<MessageShape<O>>;
+}
+
+export class Sessions {
+  constructor(private readonly runtime: Runtime) {}
+
+$methods
+}

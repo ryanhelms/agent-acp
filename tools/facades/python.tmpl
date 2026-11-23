@@ -1,0 +1,29 @@
+# Code generated from $source. DO NOT EDIT.
+from collections.abc import AsyncGenerator
+from typing import Protocol, TypeVar
+
+from google.protobuf.message import Message
+
+from $model_package import $model_name as model
+
+
+T = TypeVar("T", bound=Message)
+
+
+class Runtime(Protocol):
+    """Implement the portable session operations and propagate task cancellation."""
+
+    async def unary(self, operation: str, request: Message, response_type: type[T], /) -> T: ...
+
+    def stream(
+        self, operation: str, request: Message, response_type: type[T], /
+    ) -> AsyncGenerator[T, None]:
+        """Release the subscription on completion, cancellation or aclose()."""
+        ...
+
+
+class Sessions:
+    def __init__(self, runtime: Runtime) -> None:
+        self._runtime = runtime
+
+$methods

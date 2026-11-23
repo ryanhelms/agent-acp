@@ -1,0 +1,175 @@
+// Shared session vocabulary. The service describes SDK operations. A runtime may
+// implement them in process or through an adapter on the execution host.
+syntax = "proto3";
+
+package agentacp.v1;
+
+option go_package = "agent-acp.local/sdks/go/model;agentacpv1";
+
+service Sessions {
+  rpc Open(OpenRequest) returns (OpenResponse);
+  rpc Resume(ResumeRequest) returns (ResumeResponse);
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc Observe(ObserveRequest) returns (stream Observation);
+  rpc Answer(AnswerRequest) returns (AnswerResponse);
+  rpc Interrupt(InterruptRequest) returns (InterruptResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc ReadHistory(ReadHistoryRequest) returns (ReadHistoryResponse);
+}
+
+// Provider-issued IDs are opaque and scoped to a configured harness instance.
+// Two machines can have an identically named harness and native session.
+message SessionRef {
+  string harness_instance = 1;
+  string session_id = 2;
+}
+
+message Capabilities {
+  bool can_resume = 1;
+  bool can_answer = 2;
+  bool can_interrupt = 3;
+  bool can_list_sessions = 4;
+  bool can_read_history = 5;
+}
+
+message Session {
+  SessionRef ref = 1;
+  Capabilities capabilities = 2;
+  string display_name = 3;
+}
+
+message OpenRequest {
+  string harness_instance = 1;
+  string working_directory = 2;
+  string model = 3;
+}
+message OpenResponse {
+  Session session = 1;
+}
+message ResumeRequest {
+  SessionRef session = 1;
+}
+message ResumeResponse {
+  Session session = 1;
+}
+
+enum DeliveryStatus {
+  DELIVERY_STATUS_UNSPECIFIED = 0;
+  DELIVERY_STATUS_ACCEPTED = 1;
+  DELIVERY_STATUS_DELIVERED = 2;
+  DELIVERY_STATUS_UNKNOWN = 3;
+  DELIVERY_STATUS_UNSUPPORTED = 4;
+}
+
+// Acceptance and provider delivery are distinct evidence. Reconcile an
+// uncertain operation by ID before attempting a retry.
+message Receipt {
+  string operation_id = 1;
+  DeliveryStatus status = 2;
+  string detail = 3;
+}
+message SendRequest {
+  SessionRef session = 1;
+  string operation_id = 2;
+  // Preserve whitespace and shell punctuation exactly.
+  string text = 3;
+}
+message SendResponse {
+  Receipt receipt = 1;
+}
+message AnswerRequest {
+  SessionRef session = 1;
+  string operation_id = 2;
+  string request_id = 3;
+  oneof answer {
+    string text = 4;
+    string option_id = 5;
+  }
+}
+message AnswerResponse {
+  Receipt receipt = 1;
+}
+message InterruptRequest {
+  SessionRef session = 1;
+  string operation_id = 2;
+  string turn_id = 3;
+}
+message InterruptResponse {
+  Receipt receipt = 1;
+}
+message ObserveRequest {
+  SessionRef session = 1;
+  string after_cursor = 2;
+}
+
+enum Speaker {
+  SPEAKER_UNSPECIFIED = 0;
+  SPEAKER_USER = 1;
+  SPEAKER_ASSISTANT = 2;
+  SPEAKER_SYSTEM = 3;
+}
+message TextUpdate {
+  Speaker speaker = 1;
+  string text = 2;
+}
+message ToolActivity {
+  string call_id = 1;
+  string name = 2;
+  string phase = 3;
+  string summary = 4;
+}
+message Choice {
+  string id = 1;
+  string label = 2;
+}
+message InputRequest {
+  string request_id = 1;
+  string prompt = 2;
+  repeated Choice choices = 3;
+}
+message TurnEnded {
+  string reason = 1;
+}
+message HistoryGap {
+  string reason = 1;
+}
+message Extension {
+  string type = 1;
+  string media_type = 2;
+  bytes data = 3;
+}
+message Observation {
+  SessionRef session = 1;
+  string cursor = 2;
+  string turn_id = 3;
+  oneof event {
+    TextUpdate text = 4;
+    ToolActivity tool = 5;
+    InputRequest input = 6;
+    TurnEnded turn_ended = 7;
+    HistoryGap gap = 8;
+    Extension extension = 9;
+  }
+}
+
+message ListSessionsRequest {
+  string harness_instance = 1;
+  string working_directory = 2;
+  string cursor = 3;
+  uint32 limit = 4;
+}
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+  string next_cursor = 2;
+}
+// Read-only. Fetch retained native records without activating a session or
+// replaying historical requests as actionable approvals.
+message ReadHistoryRequest {
+  SessionRef session = 1;
+  string cursor = 2;
+  uint32 limit = 3;
+}
+message ReadHistoryResponse {
+  repeated Observation observations = 1;
+  string next_cursor = 2;
+}

@@ -1,0 +1,71 @@
+// Code generated from $source. DO NOT EDIT.
+
+package agentacp
+
+import (
+	"context"
+	"errors"
+	"io"
+	"iter"
+
+	model "$model_import"
+	"google.golang.org/protobuf/proto"
+)
+
+// Runtime implements the portable session operations on the execution host.
+// Unary fills response. Stream and its reads must observe ctx cancellation.
+type Runtime interface {
+	Unary(ctx context.Context, operation string, request, response proto.Message) error
+	Stream(ctx context.Context, operation string, request proto.Message) (Stream, error)
+}
+
+// Stream fills one response per Recv, returns io.EOF on completion, and
+// releases the subscription on Close. Closing a subscription preserves its session.
+type Stream interface {
+	Recv(response proto.Message) error
+	Close()
+}
+
+type Sessions struct {
+	runtime Runtime
+}
+
+func New(runtime Runtime) *Sessions {
+	return &Sessions{runtime: runtime}
+}
+
+func unary[T proto.Message](ctx context.Context, runtime Runtime, operation string, request proto.Message, response T) (T, error) {
+	if err := runtime.Unary(ctx, operation, request, response); err != nil {
+		var zero T
+		return zero, err
+	}
+	return response, nil
+}
+
+func stream[T proto.Message](ctx context.Context, runtime Runtime, operation string, request proto.Message, newItem func() T) iter.Seq2[T, error] {
+	return func(yield func(T, error) bool) {
+		var zero T
+		reader, err := runtime.Stream(ctx, operation, request)
+		if err != nil {
+			yield(zero, err)
+			return
+		}
+		defer reader.Close()
+		for {
+			item := newItem()
+			err := reader.Recv(item)
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				yield(zero, err)
+				return
+			}
+			if !yield(item, nil) {
+				return
+			}
+		}
+	}
+}
+
+$methods

@@ -1,0 +1,19 @@
+{
+  "name": "agent-acp-workspace",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "sdks/typescript"
+  ],
+  "scripts": {
+    "setup": "python3 tools/codegen.py setup",
+    "generate": "python3 tools/codegen.py generate",
+    "check:generated": "python3 tools/codegen.py check"
+  },
+  "devDependencies": {
+    "@bufbuild/protoc-gen-es": "2.17.0",
+    "protoc": "36.2.0"
+  }
+}

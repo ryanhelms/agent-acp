@@ -1,0 +1,10 @@
+{
+  "name": "agent-acp-local-harnesses",
+  "private": true,
+  "description": "Pinned upstream executables for the local Claude and Codex session examples",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.109.1",
+    "@agentclientprotocol/codex-acp": "2.9.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.330"
+  }
+}

@@ -21,23 +21,26 @@ import (
 type session struct {
 	// The transport selects on its reader goroutine. It must not wait for a
 	// callback or a session operation that might itself need that reader.
-	wireSession atomic.Pointer[string]
-	wireTurn    atomic.Bool
-	wireSetup   atomic.Bool
-	cwd         string
-	mu          sync.Mutex
-	p           *peer
-	info        *model.Session
-	turn        *turn
-	permissions map[string]*permission
-	operations  map[string]operation
-	closed      bool
-	epoch       string
-	sequence    uint64
-	windowBytes int
-	events      []*model.Observation
-	changed     chan struct{}
-	setup       *sessionSetup
+	wireSession     atomic.Pointer[string]
+	wireTurn        atomic.Bool
+	wireSetup       atomic.Bool
+	cwd             string
+	mu              sync.Mutex
+	p               *peer
+	info            *model.Session
+	turn            *turn
+	permissions     map[string]*permission
+	operations      map[string]operation
+	closed          bool
+	epoch           string
+	sequence        uint64
+	windowBytes     int
+	events          []*model.Observation
+	expiredControls []controlObservation
+	controlBytes    int
+	lostControl     uint64
+	changed         chan struct{}
+	setup           *sessionSetup
 }
 
 type turn struct {

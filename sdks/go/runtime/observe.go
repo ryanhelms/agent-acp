@@ -15,9 +15,28 @@ import (
 )
 
 const (
-	liveWindow      = 512
-	liveWindowBytes = 2 << 20
+	liveWindow         = 512
+	liveWindowBytes    = 2 << 20
+	controlWindow      = 64
+	controlWindowBytes = 256 << 10
 )
+
+// observationOnlyGap identifies a skipped data interval for which the runtime
+// retained every evicted permission and turn result separately.
+const observationOnlyGap = "acp.observation_only_gap"
+
+// IsObservationOnlyGap reports whether a gap emitted by this runtime skipped
+// only observational data. On an unrecognized gap, callers must reconcile
+// pending permission and turn evidence before resuming control.
+func IsObservationOnlyGap(obs *model.Observation) bool {
+	return obs.GetGap() != nil && obs.GetSourceRecord().GetType() == observationOnlyGap
+}
+
+type controlObservation struct {
+	sequence    uint64
+	observation *model.Observation
+	size        int
+}
 
 func (s *session) signal()                  { close(s.changed); s.changed = make(chan struct{}) }
 func (s *session) cursor(seq uint64) string { return s.epoch + "." + strconv.FormatUint(seq, 10) }
@@ -121,11 +140,40 @@ func (s *session) retain(event *model.Observation, size int) {
 	s.events = append(s.events, event)
 	s.windowBytes += size
 	for len(s.events) > liveWindow || s.windowBytes > liveWindowBytes {
-		s.windowBytes -= proto.Size(s.events[0])
+		oldest := s.events[0]
+		size := proto.Size(oldest)
+		if isControlObservation(oldest) {
+			sequence := s.sequence - uint64(len(s.events)) + 1
+			s.retainControl(controlObservation{sequence: sequence, observation: oldest, size: size})
+		}
+		s.windowBytes -= size
 		s.events[0] = nil
 		s.events = s.events[1:]
 	}
 	s.signal()
+}
+
+func isControlObservation(obs *model.Observation) bool {
+	if obs.GetInput() != nil || obs.GetTurnEnded() != nil {
+		return true
+	}
+	switch obs.GetExtension().GetType() {
+	case "acp.v2_prompt_accepted", "acp.v2_permission_dismissed":
+		return true
+	}
+	return false
+}
+
+func (s *session) retainControl(event controlObservation) {
+	s.expiredControls = append(s.expiredControls, event)
+	s.controlBytes += event.size
+	for len(s.expiredControls) > controlWindow || s.controlBytes > controlWindowBytes {
+		oldest := &s.expiredControls[0]
+		s.lostControl = oldest.sequence
+		s.controlBytes -= oldest.size
+		*oldest = controlObservation{}
+		s.expiredControls = s.expiredControls[1:]
+	}
 }
 
 type observations struct {
@@ -182,12 +230,10 @@ func (o *observations) Recv(dst proto.Message) error {
 		s.mu.Lock()
 		first := s.sequence - uint64(len(s.events))
 		if o.gap || o.after < first {
-			o.gap = false
-			o.after = first
-			event := &model.Observation{Session: s.info.Ref, Cursor: s.cursor(first), Event: &model.Observation_Gap{Gap: &model.HistoryGap{Reason: "live observation window expired; use native history"}}}
+			event := o.beforeWindow(first)
+			s.mu.Unlock()
 			proto.Reset(dst)
 			proto.Merge(dst, event)
-			s.mu.Unlock()
 			return nil
 		}
 		if o.after < s.sequence {
@@ -210,4 +256,33 @@ func (o *observations) Recv(dst proto.Message) error {
 		case <-wait:
 		}
 	}
+}
+
+// beforeWindow returns missing control observations in their original order.
+// A cursor from another epoch cannot establish what has already been seen.
+func (o *observations) beforeWindow(first uint64) *model.Observation {
+	s := o.session
+	recoverable := !o.gap && o.after >= s.lostControl
+	o.gap = false
+	through := first
+	if recoverable {
+		for _, event := range s.expiredControls {
+			if event.sequence <= o.after {
+				continue
+			}
+			if event.sequence == o.after+1 {
+				o.after = event.sequence
+				return event.observation
+			}
+			through = event.sequence - 1
+			break
+		}
+	}
+	o.after = through
+	event := &model.Observation{Session: s.info.Ref, Cursor: s.cursor(through),
+		Event: &model.Observation_Gap{Gap: &model.HistoryGap{Reason: "live observation window expired; use native history"}}}
+	if recoverable {
+		event.SourceRecord = &model.Extension{Type: observationOnlyGap, MediaType: "application/json", Data: []byte("{}")}
+	}
+	return event
 }

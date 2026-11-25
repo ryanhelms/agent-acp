@@ -141,9 +141,18 @@ func TestV2Peer(t *testing.T) {
 					os.Exit(11)
 				}
 				textUpdate("session", "retained history")
+				if scenario == "child-replay" || scenario == "missing-child-marker" {
+					update("session", map[string]any{"sessionUpdate": "subagent_update", "sessionId": "child"})
+				}
 				update("crossed", map[string]any{"sessionUpdate": "replay_complete"})
 				if scenario != "missing-replay-complete" {
 					update("session", map[string]any{"sessionUpdate": "replay_complete"})
+				}
+				if scenario == "child-replay" || scenario == "missing-child-marker" {
+					textUpdate("child", "retained child history")
+					if scenario == "child-replay" {
+						update("child", map[string]any{"sessionUpdate": "replay_complete"})
+					}
 				}
 			}
 			if scenario != "missing-state" {
@@ -157,6 +166,36 @@ func TestV2Peer(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func TestV2ChildReplayHasAnIndependentCompletionMarker(t *testing.T) {
+	for _, scenario := range []string{"child-replay", "missing-child-marker"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, runtime, ctx := v2Client(t, scenario)
+			ref := &model.SessionRef{HarnessInstance: "v2", SessionId: "session"}
+			snapshot, err := runtime.LoadReplay(ctx, ref)
+			if scenario == "missing-child-marker" {
+				if err == nil || snapshot != nil {
+					t.Fatalf("incomplete child replay was published: %v %v", snapshot, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := snapshot.Page("", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range page.Observations {
+				ext := row.GetExtension()
+				if ext.GetType() == ACPChildUpdateSource && strings.Contains(string(ext.GetData()), "retained child history") {
+					return
+				}
+			}
+			t.Fatal("parent replay marker prematurely closed child replay")
+		})
+	}
 }
 
 func v2Client(t *testing.T, scenario string) (*agentacp.Sessions, *Runtime, context.Context) {

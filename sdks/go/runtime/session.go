@@ -24,6 +24,7 @@ type session struct {
 	wireSession     atomic.Pointer[string]
 	wireTurn        atomic.Bool
 	wireSetup       atomic.Bool
+	wireChildren    atomic.Bool
 	cwd             string
 	mu              sync.Mutex
 	p               *peer
@@ -43,6 +44,8 @@ type session struct {
 	setup           *sessionSetup
 	mcp             acpMCPBindings
 	v2              *v2Session
+	children        childSessions
+	compactions     *compactionState
 }
 
 type turn struct {
@@ -297,6 +300,9 @@ func (s *session) interrupt(ctx context.Context, q *model.InterruptRequest) (*mo
 }
 
 func (s *session) selectWire(method, sessionID string) bool {
+	if s.wireChildren.Load() && (method == "session/update" || method == "session/request_permission") {
+		return true
+	}
 	if method == "session/update" && s.wireSetup.Load() {
 		// The reply and first announcement can arrive in the same pipe read.
 		// finishSetup publishes only the ID selected by the matched reply.
@@ -317,7 +323,7 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if s.closed || msg.id == "" || s.info != nil && msg.id != s.info.Ref.SessionId {
+		if s.closed || msg.id == "" {
 			return nil, nil
 		}
 		if s.setup == nil && s.info == nil {
@@ -328,7 +334,7 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 		if s.setup != nil {
 			s.setup.add(msg, raw, wire)
 		} else {
-			s.publishUpdate(msg, raw, wire)
+			s.routeUpdate(msg, raw, wire)
 		}
 		return nil, nil
 	case "session/request_permission":
@@ -346,10 +352,17 @@ func (s *session) publishUpdate(msg updateParams, raw json.RawMessage, wire *mod
 		sourced = true
 		obs = s.normalizeV2(msg.update, obs)
 	}
+	if s.compactions != nil {
+		if compaction := s.compactions.observe(msg.update, s.sequence+1); compaction != nil {
+			sourced = true
+			obs = compaction
+		}
+	}
 	if sourced {
 		// A non-portable variant is itself passive evidence. Keep its
 		// full params once, including null, missing and unknown updates.
-		if obs == nil || obs.GetExtension() != nil && obs.GetExtension().GetType() != ACPV2MessageStateSource {
+		if obs == nil || obs.GetExtension() != nil && obs.GetExtension().GetType() != ACPV2MessageStateSource &&
+			obs.GetExtension().GetType() != ACPCompactionStateSource {
 			obs = nil
 		}
 		obs = s.emitWireSource(obs, ACPUpdateParamsSource, raw, wire)
@@ -400,7 +413,19 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 	receipt := transport.InboundReceipt(ctx, "session/request_permission", msg.SessionID)
 	cancel := map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
 	s.mu.Lock()
-	if receipt == nil || s.info == nil || s.closed || s.setup != nil || s.info.Ref.SessionId != msg.SessionID || s.turn == nil && s.v2 == nil {
+	if receipt == nil || s.info == nil || s.closed || s.setup != nil {
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	if s.info.Ref.SessionId != msg.SessionID {
+		if _, known := s.children[msg.SessionID]; known {
+			wire, _ := wireRecord(receipt, "session/request_permission", liveWindowBytes)
+			s.emitWireSource(nil, ACPChildPermissionSource, raw, wire)
+		}
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	if s.turn == nil && s.v2 == nil {
 		s.mu.Unlock()
 		return cancel, nil
 	}

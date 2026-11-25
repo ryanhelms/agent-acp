@@ -46,22 +46,25 @@ func (cursor replayCursor) encode() string {
 }
 
 type replayPage struct {
-	mu         sync.Mutex
-	collecting bool
-	session    *model.SessionRef
-	wanted     *replayCursor
-	snapshot   bool
-	position   replayCursor
-	prefix     hash.Hash
-	matched    bool
-	limit      int
-	size       int
-	response   model.ReadHistoryResponse
-	next       string
-	err        error
-	v2         bool
-	replayDone bool
-	stateSeen  bool
+	mu          sync.Mutex
+	collecting  bool
+	session     *model.SessionRef
+	wanted      *replayCursor
+	snapshot    bool
+	position    replayCursor
+	prefix      hash.Hash
+	matched     bool
+	limit       int
+	size        int
+	response    model.ReadHistoryResponse
+	next        string
+	err         error
+	v2          bool
+	replayDone  bool
+	stateSeen   bool
+	children    childSessions
+	childReplay map[string]bool
+	compactions *compactionState
 }
 
 // ReplaySnapshot is a bounded, immutable view of one successful passive load.
@@ -192,6 +195,9 @@ func (r *Runtime) loadReplay(ctx context.Context, page *replayPage) error {
 		return err
 	}
 	id := page.session.SessionId
+	if r.knownChild(id) {
+		return errors.New("replay a child's history through its parent session")
+	}
 	r.mu.Lock()
 	active := r.sessions[id]
 	if (active != nil && !active.p.disconnected()) || r.resuming[id] != nil {
@@ -228,6 +234,13 @@ func (r *Runtime) loadReplay(ctx context.Context, page *replayPage) error {
 	}
 	page.mu.Lock()
 	page.v2 = peer.version == 2
+	if page.v2 || r.config.ChildSessions {
+		page.children = make(childSessions)
+		page.childReplay = make(map[string]bool)
+	}
+	if page.v2 || r.config.CompactionUpdates {
+		page.compactions = &compactionState{v2: page.v2}
+	}
 	page.collecting = true
 	page.mu.Unlock()
 	if _, err := rpc[empty](ctx, peer, method, params); err != nil {
@@ -242,6 +255,13 @@ func (r *Runtime) loadReplay(ctx context.Context, page *replayPage) error {
 	if page.v2 && (!page.replayDone || !page.stateSeen) {
 		return errors.New("ACP v2 replay omitted its replay marker or current session state")
 	}
+	if page.v2 {
+		for child := range page.children {
+			if !page.childReplay[child] {
+				return errors.New("ACP v2 replay omitted a child replay marker")
+			}
+		}
+	}
 	if !page.matched {
 		return errors.New("ACP replay changed since the previous page")
 	}
@@ -251,7 +271,8 @@ func (r *Runtime) loadReplay(ctx context.Context, page *replayPage) error {
 func (page *replayPage) selectWire(method, id string) bool {
 	page.mu.Lock()
 	defer page.mu.Unlock()
-	return method == "session/update" && page.collecting && page.session.SessionId == id && page.next == "" && page.err == nil
+	_, child := page.children[id]
+	return method == "session/update" && page.collecting && (page.session.SessionId == id || child) && page.next == "" && page.err == nil
 }
 
 func (page *replayPage) handle(ctx context.Context, method string, raw json.RawMessage) (any, *acp.RequestError) {
@@ -266,17 +287,40 @@ func (page *replayPage) handle(ctx context.Context, method string, raw json.RawM
 		}
 		page.mu.Lock()
 		defer page.mu.Unlock()
-		if !page.collecting || message.id == "" || message.id != page.session.SessionId || page.err != nil {
+		root := page.session.SessionId
+		_, child := page.children[message.id]
+		if !page.collecting || message.id == "" || message.id != root && !child || page.err != nil {
 			return nil, nil
 		}
-		if page.v2 && page.v2ReplayBoundary(message.update) || page.next != "" {
+		if page.v2 && page.v2ReplayBoundary(message.id, message.update) {
+			return nil, nil
+		}
+		if page.children != nil && childAnnouncement(message.update) && !page.children.announce(root, message.id, message.update) {
+			return nil, nil
+		}
+		if page.next != "" || noticeUpdate(message.update) {
 			return nil, nil
 		}
 		var records []*model.Observation
 		wire, _ := wireRecord(transport.InboundReceipt(ctx, method, message.id), method, maxReplayRecord)
-		if message.extra || wire != nil {
+		var compaction *model.Observation
+		if page.compactions != nil && !child {
+			compaction = page.compactions.observe(message.update, uint64(page.position.Index)+1)
+		}
+		switch {
+		case child:
+			record, source := withSource(nil, ACPChildUpdateSource, raw)
+			record.WireProvenance = wire
+			boundEvidence(record, source, "replay_record_limit", maxReplayRecord)
+			records = []*model.Observation{record}
+		case compaction != nil:
+			record, source := withSource(compaction, ACPUpdateParamsSource, raw)
+			record.WireProvenance = wire
+			boundEvidence(record, source, "replay_record_limit", maxReplayRecord)
+			records = []*model.Observation{record}
+		case message.extra || wire != nil:
 			records = sourcedReplayRecords(message.update, raw, wire)
-		} else {
+		default:
 			records = replayRecords(message.update)
 		}
 		for _, record := range records {
@@ -291,10 +335,20 @@ func (page *replayPage) handle(ctx context.Context, method string, raw json.RawM
 	}
 }
 
-func (page *replayPage) v2ReplayBoundary(raw json.RawMessage) bool {
+func (page *replayPage) v2ReplayBoundary(id string, raw json.RawMessage) bool {
 	var update struct{ SessionUpdate, State string }
 	if json.Unmarshal(raw, &update) != nil {
 		return false
+	}
+	if id != page.session.SessionId {
+		if update.SessionUpdate == "replay_complete" {
+			if page.childReplay[id] {
+				page.err = errors.New("ACP v2 replay sent duplicate child completion markers")
+			}
+			page.childReplay[id] = true
+			return true
+		}
+		return page.childReplay[id] || update.SessionUpdate == "state_update"
 	}
 	switch update.SessionUpdate {
 	case "replay_complete":

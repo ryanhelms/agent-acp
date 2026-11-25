@@ -163,7 +163,7 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 	if version == 0 {
 		version = 1
 	}
-	init, err = rpc[handshake](ctx, p, "initialize", initializeParams(version))
+	init, err = rpc[handshake](ctx, p, "initialize", r.config.initializeParams(version))
 	if err != nil {
 		p.close()
 		return nil, init, err
@@ -173,7 +173,7 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 		return nil, init, fmt.Errorf("unsupported ACP protocol version %d", init.ProtocolVersion)
 	}
 	if version == 2 && init.ProtocolVersion == 1 {
-		init, err = rpc[handshake](ctx, p, "initialize", initializeParams(1))
+		init, err = rpc[handshake](ctx, p, "initialize", r.config.initializeParams(1))
 		if err != nil || init.ProtocolVersion != 1 {
 			p.close()
 			if err != nil {
@@ -186,12 +186,26 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 	return p, init, nil
 }
 
-func initializeParams(version int) map[string]any {
+func (config Config) initializeParams(version int) map[string]any {
 	info := map[string]string{"name": "agent-acp", "version": "1"}
 	if version == 2 {
 		return map[string]any{"protocolVersion": version, "info": info, "capabilities": empty{}}
 	}
-	return map[string]any{"protocolVersion": version, "clientInfo": info, "clientCapabilities": empty{}}
+	capabilities := map[string]any{}
+	if config.ChildSessions {
+		capabilities["subagents"] = empty{}
+	}
+	if config.NoticeUpdates || config.CompactionUpdates {
+		session := map[string]any{}
+		if config.NoticeUpdates {
+			session["notices"] = empty{}
+		}
+		if config.CompactionUpdates {
+			session["compaction"] = empty{}
+		}
+		capabilities["session"] = session
+	}
+	return map[string]any{"protocolVersion": version, "clientInfo": info, "clientCapabilities": capabilities}
 }
 
 func (p *peer) disconnected() bool {

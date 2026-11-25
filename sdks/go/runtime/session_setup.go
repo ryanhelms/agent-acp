@@ -51,9 +51,7 @@ func (s *session) finishSetup() error {
 		return errors.New("adapter exceeded the session setup update budget")
 	}
 	for _, update := range setup.updates {
-		if update.params.id == s.info.Ref.SessionId {
-			s.publishUpdate(update.params, update.raw, update.wire)
-		}
+		s.routeUpdate(update.params, update.raw, update.wire)
 	}
 	return nil
 }

@@ -59,6 +59,13 @@ type Config struct {
 	// ProtocolVersion opts in to negotiating wire version 2. Zero and one
 	// request stable ACP v1. The adapter can select v1 when offered v2.
 	ProtocolVersion int
+	// ChildSessions advertises v1 child observation and enables explicitly
+	// requested child cancellation. V2 child observations are always routed.
+	ChildSessions bool
+	// NoticeUpdates opts in to v1 live session notices.
+	NoticeUpdates bool
+	// CompactionUpdates opts in to v1 ID-addressed compaction state.
+	CompactionUpdates bool
 	// ModelOnResume enforces an approved model before returning a resumed session.
 	ModelOnResume string
 	// OncePermissionsOnly excludes choices that grant or deny future requests.
@@ -234,6 +241,9 @@ func (r *Runtime) Unary(ctx context.Context, op string, req, dst proto.Message) 
 		if err := r.validate(ref); err != nil {
 			return err
 		}
+		if r.knownChild(ref.SessionId) {
+			return errors.New("reattach a child through its parent session")
+		}
 		s, err := r.attach(ctx, ref.SessionId, "", "")
 		if err == nil {
 			dst.(*model.ResumeResponse).Session = s
@@ -243,6 +253,9 @@ func (r *Runtime) Unary(ctx context.Context, op string, req, dst proto.Message) 
 		q := req.(*model.ReadHistoryRequest)
 		if err := r.validate(q.Session); err != nil {
 			return err
+		}
+		if r.knownChild(q.Session.SessionId) {
+			return errors.New("read a child's history through its parent session")
 		}
 		if r.config.ReadHistory == nil && !r.config.ReplayHistory {
 			return errors.New("native history reader is unavailable for this harness")
@@ -356,6 +369,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	}()
 	caps := r.capabilities(init)
 	v2 := p.version == 2
+	s.wireChildren.Store(v2 || r.config.ChildSessions)
 	if v2 {
 		if init.Capabilities.Session == nil {
 			return nil, errors.New("adapter does not advertise ACP session support")
@@ -411,6 +425,12 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	s.p = p
 	s.cwd = cwd
 	s.info = info
+	if s.wireChildren.Load() {
+		s.children = make(childSessions)
+	}
+	if v2 || r.config.CompactionUpdates {
+		s.compactions = &compactionState{v2: v2}
+	}
 	s.wireSession.Store(&info.Ref.SessionId)
 	s.wireTurn.Store(v2)
 	s.mu.Unlock()

@@ -10,13 +10,19 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	model "agent-acp.local/sdks/go/model"
+	"agent-acp.local/transport"
 	acp "github.com/coder/acp-go-sdk"
 	"google.golang.org/protobuf/proto"
 )
 
 type session struct {
+	// The transport selects on its reader goroutine. It must not wait for a
+	// callback or a session operation that might itself need that reader.
+	wireSession atomic.Pointer[string]
+	wireTurn    atomic.Bool
 	cwd         string
 	mu          sync.Mutex
 	p           *peer
@@ -91,30 +97,60 @@ func (s *session) send(q *model.SendRequest) (*model.Receipt, error) {
 	if s.turn != nil {
 		return nil, errors.New("session already has an active turn")
 	}
+	blocks, preview, err := promptBlocks(q, s.info.Capabilities)
+	if err != nil {
+		return nil, err
+	}
 	t := &turn{id: q.OperationId, written: s.p.readyPrompt(), done: make(chan struct{})}
 	s.turn = t
-	s.emit(&model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: model.Speaker_SPEAKER_USER, Text: q.Text}}})
+	s.wireTurn.Store(true)
+	s.emit(&model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: model.Speaker_SPEAKER_USER, Text: preview}}})
 	receipt := s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "turn accepted")
-	go s.prompt(t, q.Text)
+	go s.prompt(t, blocks)
 	return receipt, nil
 }
-func (s *session) prompt(t *turn, text string) {
-	params := map[string]any{"sessionId": s.info.Ref.SessionId, "prompt": []map[string]string{{"type": "text", "text": text}}}
-	result, err := rpc[struct{ StopReason string }](s.p.runtime.ctx, s.p, "session/prompt", params)
+
+// The matched receipt supplies the original result or error without another
+// JSON decoding/copy of a potentially large result.
+type receiptResult struct{}
+
+func (*receiptResult) UnmarshalJSON([]byte) error { return nil }
+
+func (s *session) prompt(t *turn, blocks []map[string]string) {
+	params := map[string]any{"sessionId": s.info.Ref.SessionId, "prompt": blocks}
+	_, receipt, err := transport.SendRequestWithReceipt[receiptResult](s.p.conn, s.p.runtime.ctx, "session/prompt", params)
+	wire, result := wireRecord(receipt, "session/prompt", liveWindowBytes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.turn != t {
 		return
 	}
+	if wire.GetKind() == model.WireMessageKind_WIRE_MESSAGE_KIND_ERROR {
+		s.unknown(t.id)
+		s.end("adapter returned a prompt error", "acp.prompt_error", result, wire)
+		return
+	}
 	if err != nil {
 		s.unknown(t.id)
-		s.end(err.Error())
+		if wire.GetKind() == model.WireMessageKind_WIRE_MESSAGE_KIND_RESULT {
+			s.end("adapter result received before observation delivery was interrupted", "acp.prompt_result", result, wire)
+		} else if s.p.disconnected() {
+			s.end("adapter disconnected", "", nil, nil)
+		} else {
+			s.end("adapter prompt delivery could not be confirmed", "", nil, nil)
+		}
+		return
+	}
+	var terminal struct{ StopReason string }
+	if json.Unmarshal(result, &terminal) != nil || terminal.StopReason == "" {
+		s.unknown(t.id)
+		s.end("session/prompt returned an invalid stopReason", "acp.prompt_result", result, wire)
 		return
 	}
 	op := s.operations[t.id]
 	op.receipt.Status = model.DeliveryStatus_DELIVERY_STATUS_DELIVERED
 	op.receipt.Detail = "adapter completed turn"
-	s.end(result.StopReason)
+	s.end(terminal.StopReason, "acp.prompt_result", result, wire)
 }
 
 func (s *session) unknown(id string) {
@@ -122,8 +158,14 @@ func (s *session) unknown(id string) {
 	op.receipt.Status = model.DeliveryStatus_DELIVERY_STATUS_UNKNOWN
 	op.receipt.Detail = "provider delivery could not be confirmed"
 }
-func (s *session) end(reason string) {
-	s.emit(&model.Observation{Event: &model.Observation_TurnEnded{TurnEnded: &model.TurnEnded{Reason: reason}}})
+func (s *session) end(reason, sourceType string, raw json.RawMessage, wire *model.WireProvenance) {
+	event := &model.Observation{Event: &model.Observation_TurnEnded{TurnEnded: &model.TurnEnded{Reason: reason}}}
+	if len(raw) > 0 {
+		s.emitWireSource(event, sourceType, raw, wire)
+	} else {
+		s.emit(event)
+	}
+	s.wireTurn.Store(false)
 	close(s.turn.done)
 	s.turn = nil
 	clear(s.permissions)
@@ -131,10 +173,15 @@ func (s *session) end(reason string) {
 func (s *session) disconnect() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.turn != nil {
-		s.unknown(s.turn.id)
-		s.end("adapter disconnected")
+	if t := s.turn; t != nil {
+		// The prompt waiter owns its matched response, including when the
+		// peer exits immediately after writing it. Let the waiter publish the
+		// terminal receipt before closing the observation stream.
+		s.mu.Unlock()
+		<-t.done
+		s.mu.Lock()
 	}
+	s.wireSession.Store(nil)
 	s.closed = true
 	s.signal()
 }
@@ -194,24 +241,61 @@ func (s *session) interrupt(ctx context.Context, q *model.InterruptRequest) (*mo
 	return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "cancellation sent to adapter"), nil
 }
 
+func (s *session) selectWire(method, sessionID string) bool {
+	id := s.wireSession.Load()
+	return id != nil && *id == sessionID && (method == "session/update" || (method == "session/request_permission" && s.wireTurn.Load()))
+}
+
 func (s *session) handle(ctx context.Context, method string, raw json.RawMessage) (any, *acp.RequestError) {
 	switch method {
 	case "session/update":
-		var msg struct {
-			SessionID string
-			Update    json.RawMessage
-		}
-		if err := json.Unmarshal(raw, &msg); err != nil {
+		msg, err := decodeUpdateParams(raw)
+		if err != nil {
 			return nil, acp.NewInvalidParams(err.Error())
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		// Initial and resume/load replay notifications arrive before the session
-		// becomes live. Historical decisions are never registered as actionable.
-		if s.info != nil && msg.SessionID == s.info.Ref.SessionId && !s.closed {
-			if obs := normalizeUpdate(msg.Update); obs != nil {
-				s.emit(obs)
+		// Setup and load replay cannot create live observations or actions.
+		if s.info == nil || s.closed || msg.id == "" || msg.id != s.info.Ref.SessionId {
+			return nil, nil
+		}
+		wire, _ := wireRecord(transport.InboundReceipt(ctx, method, msg.id), method, liveWindowBytes)
+		sourced := msg.extra || wire != nil
+		obs := normalizeUpdate(msg.update)
+		if sourced {
+			// A non-portable variant is itself passive evidence. Keep its
+			// full params once, including null, missing and unknown updates.
+			if obs == nil || obs.GetExtension() != nil {
+				obs = nil
 			}
+			obs = s.emitWireSource(obs, ACPUpdateParamsSource, raw, wire)
+		} else if obs != nil {
+			s.emit(obs)
+		} else {
+			return nil, nil
+		}
+		if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
+			source := ACPUpdate{Session: &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: msg.id}, TurnID: obs.TurnId, Cursor: obs.Cursor}
+			if wire != nil {
+				source.WireProvenance = proto.Clone(wire).(*model.WireProvenance)
+			}
+			if sourced {
+				source.ParamsSize = len(raw)
+			}
+			record := obs.GetSourceRecord()
+			if record == nil {
+				record = obs.GetExtension()
+			}
+			if sourced && record.GetType() == ACPUpdateParamsSource {
+				source.Params = append(json.RawMessage(nil), raw...)
+				if msg.update != nil {
+					end := msg.offset + len(msg.update)
+					source.Body = source.Params[msg.offset:end:end]
+				}
+			} else {
+				source.Body = append(json.RawMessage(nil), msg.update...)
+			}
+			capture(source)
 		}
 		return nil, nil
 	case "session/request_permission":
@@ -227,14 +311,25 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 		ToolCall  struct{ Title, ToolCallID string }
 		Options   []struct{ OptionID, Name, Kind string }
 	}
-	if err := json.Unmarshal(raw, &msg); err != nil {
-		return nil, acp.NewInvalidParams(err.Error())
-	}
+	decodeErr := json.Unmarshal(raw, &msg)
+	receipt := transport.InboundReceipt(ctx, "session/request_permission", msg.SessionID)
 	cancel := map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
 	s.mu.Lock()
-	if s.info == nil || s.closed || s.info.Ref.SessionId != msg.SessionID || s.turn == nil {
+	if receipt == nil || s.info == nil || s.closed || s.info.Ref.SessionId != msg.SessionID || s.turn == nil {
 		s.mu.Unlock()
 		return cancel, nil
+	}
+	wire, _ := wireRecord(receipt, "session/request_permission", liveWindowBytes)
+	if wire.GetKind() != model.WireMessageKind_WIRE_MESSAGE_KIND_REQUEST || string(receipt.ID) == "null" {
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	if decodeErr != nil {
+		// A bad nested field can still belong to a known session. Keep the
+		// original as passive source without creating an actionable request.
+		s.emitWireSource(nil, "acp.permission_request", raw, wire)
+		s.mu.Unlock()
+		return nil, acp.NewInvalidParams(decodeErr.Error())
 	}
 	t := s.turn
 	id := identifier()
@@ -251,11 +346,19 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 		req.Choices = append(req.Choices, &model.Choice{Id: opt.OptionID, Label: opt.Name})
 	}
 	if len(req.Choices) == 0 {
+		s.emitWireSource(nil, "acp.permission_request", raw, wire)
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	event := &model.Observation{Event: &model.Observation_Input{Input: req}}
+	s.emitWireSource(event, "acp.permission_request", raw, wire)
+	if event.GetInput() == nil {
+		// Even the full set of answer IDs could not fit the window. The
+		// retained source marker is passive, so no approval can be pending.
 		s.mu.Unlock()
 		return cancel, nil
 	}
 	s.permissions[id] = pending
-	s.emit(&model.Observation{Event: &model.Observation_Input{Input: req}})
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.permissions, id); s.mu.Unlock() }()
 	select {
@@ -270,9 +373,9 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 
 func normalizeUpdate(raw json.RawMessage) *model.Observation {
 	var u struct {
-		SessionUpdate                   string
-		Content                         json.RawMessage
-		ToolCallID, Title, Status, Kind string
+		SessionUpdate                         string
+		Content, RawOutput                    json.RawMessage
+		ToolCallID, Title, Name, Status, Kind string
 	}
 	if json.Unmarshal(raw, &u) != nil || u.SessionUpdate == "" {
 		return nil
@@ -289,24 +392,96 @@ func normalizeUpdate(raw json.RawMessage) *model.Observation {
 		}
 	case "tool_call", "tool_call_update":
 		phase := u.Status
+		summary, failed := toolSummary(u.Content, u.RawOutput, u.Kind)
+		if failed && (phase == "" || phase == "completed") {
+			phase = "failed"
+		}
 		if phase == "" {
 			phase = u.SessionUpdate
 		}
-		return &model.Observation{Event: &model.Observation_Tool{Tool: &model.ToolActivity{CallId: u.ToolCallID, Name: u.Title, Phase: phase, Summary: toolSummary(u.Content, u.Kind)}}}
+		name := u.Title
+		if name == "" {
+			name = u.Name
+		}
+		return &model.Observation{Event: &model.Observation_Tool{Tool: &model.ToolActivity{CallId: u.ToolCallID, Name: name, Phase: phase, Summary: summary}}}
 	}
 	return &model.Observation{Event: &model.Observation_Extension{Extension: &model.Extension{Type: u.SessionUpdate, MediaType: "application/json", Data: raw}}}
 }
 
-// toolSummary takes the displayed result from ACP's typed content blocks.
-// Large output stays in the harness's native transcript.
-func toolSummary(raw json.RawMessage, kind string) string {
-	var blocks []struct {
-		Type, Path, TerminalID string
-		Content                struct{ Type, Text string }
+type toolContentBlock struct {
+	Type, Path, TerminalID string
+	Content                json.RawMessage
+}
+
+type mcpToolResult struct {
+	Content           []json.RawMessage
+	StructuredContent json.RawMessage
+	IsError           bool
+}
+
+// toolSummary keeps ACP display content and takes failure evidence from either
+// a direct MCP result or a JSON-RPC reply carried by the adapter in rawOutput.
+func toolSummary(raw, rawOutput json.RawMessage, kind string) (string, bool) {
+	var blocks []toolContentBlock
+	var summary string
+	if json.Unmarshal(raw, &blocks) == nil {
+		summary = formatToolBlocks(blocks)
 	}
-	if json.Unmarshal(raw, &blocks) != nil {
-		return kind
+	var output struct {
+		mcpToolResult
+		Result *mcpToolResult
+		Error  *struct {
+			Code    *int
+			Message string
+		}
 	}
+	var prefix []string
+	var failed bool
+	if json.Unmarshal(rawOutput, &output) == nil {
+		result := output.Result
+		if result == nil {
+			result = &output.mcpToolResult
+		}
+		failed = result.IsError
+		if output.Error != nil {
+			failed = failed || output.Error.Code != nil
+			if output.Error.Message != "" && (summary == "" || output.Error.Code != nil) {
+				prefix = append(prefix, output.Error.Message)
+			}
+		}
+		if len(result.StructuredContent) != 0 && result.StructuredContent[0] == '{' {
+			prefix = append(prefix, "[Structured MCP result]")
+		}
+		if summary == "" {
+			blocks = make([]toolContentBlock, 0, len(result.Content))
+			for _, part := range result.Content {
+				blocks = append(blocks, toolContentBlock{Type: "content", Content: part})
+			}
+			summary = formatToolBlocks(blocks)
+		}
+	}
+	if summary != "" {
+		prefix = append(prefix, summary)
+	}
+	if len(prefix) == 0 {
+		return kind, failed
+	}
+	return boundedToolText(strings.Join(prefix, "\n")), failed
+}
+
+func boundedToolText(text string) string {
+	const runeLimit = 1024
+	count := 0
+	for i := range text {
+		if count == runeLimit {
+			return text[:i] + "…"
+		}
+		count++
+	}
+	return text
+}
+
+func formatToolBlocks(blocks []toolContentBlock) string {
 	const runeLimit = 1024
 	var output strings.Builder
 	count := 0
@@ -314,9 +489,7 @@ func toolSummary(raw json.RawMessage, kind string) string {
 		var text string
 		switch block.Type {
 		case "content":
-			if block.Content.Type == "text" {
-				text = block.Content.Text
-			}
+			text = toolContentPreview(block.Content)
 		case "diff":
 			if block.Path != "" {
 				text = "Diff " + block.Path
@@ -344,8 +517,56 @@ func toolSummary(raw json.RawMessage, kind string) string {
 			count++
 		}
 	}
-	if output.Len() == 0 {
-		return kind
-	}
 	return output.String()
+}
+
+// toolContentPreview renders textual content and reference descriptors without
+// pulling external resources or copying embedded binary bytes into the preview.
+func toolContentPreview(raw json.RawMessage) string {
+	var block struct {
+		Type, Text, URI, MimeType, Name, Title, Description string
+		Size                                                *int64
+		Resource                                            struct {
+			URI, MimeType string
+			Text          *string
+		}
+	}
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return "[Unreadable ACP content block]"
+	}
+	var parts []string
+	switch block.Type {
+	case "text":
+		return block.Text
+	case "resource_link":
+		parts = []string{"[Resource link]", block.Title, block.Name, block.URI, block.MimeType}
+		if block.Size != nil {
+			parts = append(parts, fmt.Sprintf("%d bytes", *block.Size))
+		}
+		if block.Description != "" {
+			parts = append(parts, "\n"+block.Description)
+		}
+	case "resource":
+		parts = []string{"[Embedded resource]", block.Resource.URI, block.Resource.MimeType}
+		if block.Resource.Text != nil {
+			return joinPreviewParts(parts) + "\n" + *block.Resource.Text
+		}
+	case "image", "audio":
+		parts = []string{"[ACP " + block.Type + "]", block.MimeType, block.URI}
+	case "":
+		return "[ACP content type missing]"
+	default:
+		return "[ACP content: " + block.Type + "]"
+	}
+	return joinPreviewParts(parts)
+}
+
+func joinPreviewParts(parts []string) string {
+	var present []string
+	for _, part := range parts {
+		if part != "" {
+			present = append(present, part)
+		}
+	}
+	return strings.Join(present, " ")
 }

@@ -22,10 +22,16 @@ import (
 // ACPReplaySource identifies original updates alongside normalized history records.
 const ACPReplaySource = "acp.replay_update"
 
+// ErrReplaySnapshotLimit reports that a complete passive replay did not fit
+// in the snapshot's retention budget.
+var ErrReplaySnapshotLimit = errors.New("ACP replay exceeds the snapshot retention limit")
+
 const (
-	maxReplayRecord = 720 << 10
-	maxReplayPage   = 4 << 20
-	maxReplayLimit  = 128
+	maxReplayRecord          = 720 << 10
+	maxReplayPage            = 4 << 20
+	maxReplayLimit           = 128
+	maxReplaySnapshotBytes   = 32 << 20
+	maxReplaySnapshotRecords = 32 << 10
 )
 
 type replayCursor struct {
@@ -43,7 +49,8 @@ type replayPage struct {
 	mu         sync.Mutex
 	collecting bool
 	session    *model.SessionRef
-	wanted     replayCursor
+	wanted     *replayCursor
+	snapshot   bool
 	position   replayCursor
 	prefix     hash.Hash
 	matched    bool
@@ -54,13 +61,139 @@ type replayPage struct {
 	err        error
 }
 
+// ReplaySnapshot is a bounded, immutable view of one successful passive load.
+// Its cursors still identify provider content, so a rebuilt unchanged snapshot
+// can resolve existing links.
+type ReplaySnapshot struct {
+	scope string
+	rows  []*model.Observation
+	bytes int
+}
+
+func (s *ReplaySnapshot) Size() int { return s.bytes }
+
+// Page returns an isolated copy of the next bounded page.
+func (s *ReplaySnapshot) Page(cursor string, limit uint32) (*model.ReadHistoryResponse, error) {
+	after, err := s.index(cursor)
+	if err != nil {
+		return nil, err
+	}
+	out := &model.ReadHistoryResponse{}
+	size, count := 0, replayLimit(limit)
+	for _, row := range s.rows[after:] {
+		width := proto.Size(row)
+		if len(out.Observations) >= count || size+width > maxReplayPage {
+			out.NextCursor = out.Observations[len(out.Observations)-1].Cursor
+			break
+		}
+		out.Observations = append(out.Observations, proto.CloneOf(row))
+		size += width
+	}
+	return out, nil
+}
+
+// Record resolves one exact original without scanning a page of neighboring rows.
+func (s *ReplaySnapshot) Record(cursor string) (*model.Observation, error) {
+	index, err := s.index(cursor)
+	if err != nil {
+		return nil, err
+	}
+	if index == 0 {
+		return nil, errors.New("ACP replay record requires a cursor")
+	}
+	return proto.CloneOf(s.rows[index-1]), nil
+}
+
+func (s *ReplaySnapshot) index(cursor string) (int, error) {
+	wanted, err := parseReplayCursor(cursor, s.scope)
+	if err != nil || wanted.Index == 0 {
+		return 0, err
+	}
+	if wanted.Index > len(s.rows) || s.rows[wanted.Index-1].Cursor != wanted.encode() {
+		return 0, errors.New("ACP replay changed since the previous page")
+	}
+	return wanted.Index, nil
+}
+
+func (r *Runtime) replayScope(ref *model.SessionRef) string {
+	scope := sha256.Sum256([]byte(r.config.HarnessInstance + "\x00" + ref.SessionId + "\x00" + r.config.WorkingDirectory))
+	return hex.EncodeToString(scope[:])
+}
+
+func parseReplayCursor(cursor, scope string) (replayCursor, error) {
+	wanted := replayCursor{Scope: scope}
+	if cursor == "" {
+		return wanted, nil
+	}
+	if len(cursor) > 2048 {
+		return wanted, errors.New("invalid ACP replay cursor")
+	}
+	body, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || json.Unmarshal(body, &wanted) != nil || wanted.Scope != scope ||
+		wanted.Index < 1 || len(wanted.Hash) != sha256.Size*2 {
+		return wanted, errors.New("invalid ACP replay cursor for this session")
+	}
+	return wanted, nil
+}
+
+func replayLimit(limit uint32) int {
+	if limit == 0 {
+		return 32
+	}
+	return int(min(limit, maxReplayLimit))
+}
+
+// LoadReplay loads an inactive session once with no MCP servers and creates a
+// snapshot only if the complete replay fits inside the finite retention budget.
+func (r *Runtime) LoadReplay(ctx context.Context, ref *model.SessionRef) (*ReplaySnapshot, error) {
+	if err := r.validate(ref); err != nil {
+		return nil, err
+	}
+	if !r.config.ReplayHistory {
+		return nil, errors.New("ACP replay is unavailable for this harness")
+	}
+	scope := r.replayScope(ref)
+	page := &replayPage{
+		session: proto.CloneOf(ref), position: replayCursor{Scope: scope},
+		snapshot: true, matched: true, prefix: sha256.New(),
+	}
+	if err := r.loadReplay(ctx, page); err != nil {
+		return nil, err
+	}
+	return &ReplaySnapshot{scope: scope, rows: page.response.Observations, bytes: page.size}, nil
+}
+
 func (r *Runtime) replayHistory(ctx context.Context, request *model.ReadHistoryRequest) (*model.ReadHistoryResponse, error) {
-	id := request.Session.SessionId
+	scope := r.replayScope(request.Session)
+	wanted, err := parseReplayCursor(request.Cursor, scope)
+	if err != nil {
+		return nil, err
+	}
+	page := &replayPage{
+		session: request.Session, wanted: &wanted, position: replayCursor{Scope: scope},
+		prefix: sha256.New(), matched: wanted.Index == 0, limit: replayLimit(request.Limit),
+	}
+	if err := r.loadReplay(ctx, page); err != nil {
+		return nil, err
+	}
+	page.response.NextCursor = page.next
+	return &page.response, nil
+}
+
+func (r *Runtime) loadReplay(ctx context.Context, page *replayPage) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(r.ctx, cancel)
+	defer stop()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	id := page.session.SessionId
 	r.mu.Lock()
 	active := r.sessions[id]
 	if (active != nil && !active.p.disconnected()) || r.resuming[id] != nil {
 		r.mu.Unlock()
-		return nil, errors.New("ACP replay requires an inactive session")
+		return errors.New("ACP replay requires an inactive session")
 	}
 	ready := make(chan struct{})
 	r.resuming[id] = ready
@@ -72,54 +205,34 @@ func (r *Runtime) replayHistory(ctx context.Context, request *model.ReadHistoryR
 		r.mu.Unlock()
 	}()
 
-	scope := sha256.Sum256([]byte(r.config.HarnessInstance + "\x00" + request.Session.SessionId + "\x00" + r.config.WorkingDirectory))
-	var cursor replayCursor
-	cursor.Scope = hex.EncodeToString(scope[:])
-	wanted := cursor
-	if request.Cursor != "" {
-		if len(request.Cursor) > 2048 {
-			return nil, errors.New("invalid ACP replay cursor")
-		}
-		body, err := base64.RawURLEncoding.DecodeString(request.Cursor)
-		if err != nil || json.Unmarshal(body, &wanted) != nil || wanted.Scope != cursor.Scope ||
-			wanted.Index < 1 || len(wanted.Hash) != sha256.Size*2 {
-			return nil, errors.New("invalid ACP replay cursor for this session")
-		}
-	}
-
-	limit := int(min(request.Limit, maxReplayLimit))
-	if limit == 0 {
-		limit = 32
-	}
-	page := &replayPage{session: request.Session, wanted: wanted, position: cursor,
-		prefix: sha256.New(), matched: wanted.Index == 0, limit: limit}
-	peer, init, err := r.connect(ctx, page.handle, page.selectWire)
+	peer, init, err := r.connectWithOptions(ctx, page.handle, page.selectWire, transport.Options{
+		HandleNotificationsInline: true,
+	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer peer.close()
 	if !init.AgentCapabilities.LoadSession {
-		return nil, errors.New("adapter does not advertise ACP session loading")
+		return errors.New("adapter does not advertise ACP session loading")
 	}
 	page.mu.Lock()
 	page.collecting = true
 	page.mu.Unlock()
 	if _, err := rpc[empty](ctx, peer, "session/load", map[string]any{
-		"sessionId": request.Session.SessionId, "cwd": r.config.WorkingDirectory, "mcpServers": []empty{},
+		"sessionId": id, "cwd": r.config.WorkingDirectory, "mcpServers": []empty{},
 	}); err != nil {
-		return nil, err
+		return err
 	}
 	page.mu.Lock()
 	defer page.mu.Unlock()
 	page.collecting = false
 	if page.err != nil {
-		return nil, page.err
+		return page.err
 	}
 	if !page.matched {
-		return nil, errors.New("ACP replay changed since the previous page")
+		return errors.New("ACP replay changed since the previous page")
 	}
-	page.response.NextCursor = page.next
-	return &page.response, nil
+	return nil
 }
 
 func (page *replayPage) selectWire(method, id string) bool {
@@ -182,7 +295,6 @@ func replayRecords(raw json.RawMessage) []*model.Observation {
 			Reason: "An ACP replay record exceeded the history size limit",
 		}}}}
 	}
-	raw = canonicalReplayJSON(raw)
 	original := &model.Observation{Event: &model.Observation_Extension{Extension: &model.Extension{
 		Type: ACPReplaySource, MediaType: "application/json", Data: raw,
 	}}}
@@ -237,7 +349,7 @@ func terminalToolPhase(phase string) bool {
 
 func (page *replayPage) add(record *model.Observation) {
 	size := proto.Size(record)
-	if page.matched && (len(page.response.Observations) >= page.limit || page.size+size > maxReplayPage) {
+	if !page.snapshot && page.matched && (len(page.response.Observations) >= page.limit || page.size+size > maxReplayPage) {
 		page.next = page.position.encode()
 		return
 	}
@@ -249,7 +361,7 @@ func (page *replayPage) add(record *model.Observation) {
 	}
 	sourced := source.GetType() == ACPUpdateParamsSource || source.GetType() == "acp.source_omitted"
 	var original []byte
-	if source.GetType() == ACPUpdateParamsSource {
+	if kind := source.GetType(); kind == ACPUpdateParamsSource || (source != record.GetSourceRecord() && source.GetMediaType() == "application/json") {
 		original = source.Data
 		source.Data = canonicalReplayJSON(original)
 	}
@@ -288,6 +400,13 @@ func (page *replayPage) add(record *model.Observation) {
 	record.Session, record.Cursor = page.session, page.position.encode()
 	if sourced {
 		record.SourceCursor = proto.String(record.Cursor)
+	}
+	if page.snapshot {
+		size = proto.Size(record)
+		if len(page.response.Observations) >= maxReplaySnapshotRecords || page.size+size > maxReplaySnapshotBytes {
+			page.err = ErrReplaySnapshotLimit
+			return
+		}
 	}
 	page.size += size
 	page.response.Observations = append(page.response.Observations, record)

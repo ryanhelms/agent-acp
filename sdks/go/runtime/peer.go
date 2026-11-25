@@ -94,6 +94,10 @@ func transportLogger(output io.Writer) *slog.Logger {
 }
 
 func (r *Runtime) connect(ctx context.Context, handle transport.MethodHandler, selectInbound func(method, sessionID string) bool) (*peer, handshake, error) {
+	return r.connectWithOptions(ctx, handle, selectInbound, transport.Options{})
+}
+
+func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.MethodHandler, selectInbound func(method, sessionID string) bool, opts transport.Options) (*peer, handshake, error) {
 	var init handshake
 	if r.config.Command == "" {
 		return nil, init, errors.New("live operations require an adapter command")
@@ -128,7 +132,7 @@ func (r *Runtime) connect(ctx context.Context, handle transport.MethodHandler, s
 	// Configure sanitized diagnostics and receipt scope before the child can
 	// emit any frames, including unsolicited pre-handshake notifications.
 	p := &peer{runtime: r, cmd: cmd, in: in, out: out, exited: make(chan struct{})}
-	opts := transport.Options{Logger: transportLogger(r.config.Stderr)}
+	opts.Logger = transportLogger(r.config.Stderr)
 	if selectInbound != nil {
 		opts.InboundMethods = []string{"session/update", "session/request_permission"}
 		opts.SelectInbound = selectInbound

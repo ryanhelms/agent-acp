@@ -55,7 +55,12 @@ func (p *peer) initialize(ctx context.Context, raw json.RawMessage) (json.RawMes
 		}
 		return p.initResult, nil
 	}
-	var init struct{ ProtocolVersion int }
+	var init struct {
+		ProtocolVersion   int
+		AgentCapabilities struct {
+			SessionCapabilities struct{ Close *struct{} }
+		}
+	}
 	if json.Unmarshal(params, &init) != nil || init.ProtocolVersion != p.version {
 		return nil, acp.NewInvalidParams("ACP broker launch does not match the requested protocol version")
 	}
@@ -67,6 +72,10 @@ func (p *peer) initialize(ctx context.Context, raw json.RawMessage) (json.RawMes
 	if json.Unmarshal(result, &init) != nil || init.ProtocolVersion != p.version {
 		p.close()
 		return nil, acp.NewInvalidParams("shared ACP peer did not negotiate the qualified protocol version")
+	}
+	if p.version == 1 && init.AgentCapabilities.SessionCapabilities.Close == nil {
+		p.close()
+		return nil, acp.NewInvalidParams("shared ACP v1 peer must advertise session close")
 	}
 	p.initParams, p.initResult = params, result
 	return result, nil

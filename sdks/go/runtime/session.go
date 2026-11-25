@@ -23,6 +23,7 @@ type session struct {
 	// callback or a session operation that might itself need that reader.
 	wireSession atomic.Pointer[string]
 	wireTurn    atomic.Bool
+	wireSetup   atomic.Bool
 	cwd         string
 	mu          sync.Mutex
 	p           *peer
@@ -36,12 +37,14 @@ type session struct {
 	windowBytes int
 	events      []*model.Observation
 	changed     chan struct{}
+	setup       *sessionSetup
 }
 
 type turn struct {
-	id      string
-	written <-chan struct{}
-	done    chan struct{}
+	id               string
+	written          <-chan struct{}
+	done             chan struct{}
+	cancellationSent bool
 }
 type permission struct {
 	options map[string]bool
@@ -234,14 +237,29 @@ func (s *session) interrupt(ctx context.Context, q *model.InterruptRequest) (*mo
 	if s.turn != t {
 		return nil, errors.New("target turn ended")
 	}
+	if t.cancellationSent {
+		return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "cancellation already sent to adapter"), nil
+	}
 	err := s.p.conn.SendNotification(ctx, "session/cancel", map[string]string{"sessionId": s.info.Ref.SessionId})
 	if err != nil {
 		return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_UNKNOWN, err.Error()), nil
 	}
+	t.cancellationSent = true
+	// The peer may need these replies before it can finish the original prompt.
+	// Only unanswered permissions are in the map, so each waiter can be settled once.
+	for _, pending := range s.permissions {
+		close(pending.answer)
+	}
+	clear(s.permissions)
 	return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "cancellation sent to adapter"), nil
 }
 
 func (s *session) selectWire(method, sessionID string) bool {
+	if method == "session/update" && s.wireSetup.Load() {
+		// The reply and first announcement can arrive in the same pipe read.
+		// finishSetup publishes only the ID selected by the matched reply.
+		return true
+	}
 	id := s.wireSession.Load()
 	return id != nil && *id == sessionID && (method == "session/update" || (method == "session/request_permission" && s.wireTurn.Load()))
 }
@@ -255,53 +273,65 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		// Setup and load replay cannot create live observations or actions.
-		if s.info == nil || s.closed || msg.id == "" || msg.id != s.info.Ref.SessionId {
+		if s.closed || msg.id == "" || s.info != nil && msg.id != s.info.Ref.SessionId {
+			return nil, nil
+		}
+		if s.setup == nil && s.info == nil {
+			// Load replay has its own passive reader.
 			return nil, nil
 		}
 		wire, _ := wireRecord(transport.InboundReceipt(ctx, method, msg.id), method, liveWindowBytes)
-		sourced := msg.extra || wire != nil
-		obs := normalizeUpdate(msg.update)
-		if sourced {
-			// A non-portable variant is itself passive evidence. Keep its
-			// full params once, including null, missing and unknown updates.
-			if obs == nil || obs.GetExtension() != nil {
-				obs = nil
-			}
-			obs = s.emitWireSource(obs, ACPUpdateParamsSource, raw, wire)
-		} else if obs != nil {
-			s.emit(obs)
+		if s.setup != nil {
+			s.setup.add(msg, raw, wire)
 		} else {
-			return nil, nil
-		}
-		if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
-			source := ACPUpdate{Session: &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: msg.id}, TurnID: obs.TurnId, Cursor: obs.Cursor}
-			if wire != nil {
-				source.WireProvenance = proto.Clone(wire).(*model.WireProvenance)
-			}
-			if sourced {
-				source.ParamsSize = len(raw)
-			}
-			record := obs.GetSourceRecord()
-			if record == nil {
-				record = obs.GetExtension()
-			}
-			if sourced && record.GetType() == ACPUpdateParamsSource {
-				source.Params = append(json.RawMessage(nil), raw...)
-				if msg.update != nil {
-					end := msg.offset + len(msg.update)
-					source.Body = source.Params[msg.offset:end:end]
-				}
-			} else {
-				source.Body = append(json.RawMessage(nil), msg.update...)
-			}
-			capture(source)
+			s.publishUpdate(msg, raw, wire)
 		}
 		return nil, nil
 	case "session/request_permission":
 		return s.requestPermission(ctx, raw)
 	default:
 		return nil, acp.NewMethodNotFound(method)
+	}
+}
+
+// publishUpdate runs with s.mu held, preserving observer and source callback order.
+func (s *session) publishUpdate(msg updateParams, raw json.RawMessage, wire *model.WireProvenance) {
+	sourced := msg.extra || wire != nil
+	obs := normalizeUpdate(msg.update)
+	if sourced {
+		// A non-portable variant is itself passive evidence. Keep its
+		// full params once, including null, missing and unknown updates.
+		if obs == nil || obs.GetExtension() != nil {
+			obs = nil
+		}
+		obs = s.emitWireSource(obs, ACPUpdateParamsSource, raw, wire)
+	} else if obs != nil {
+		s.emit(obs)
+	} else {
+		return
+	}
+	if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
+		source := ACPUpdate{Session: &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: msg.id}, TurnID: obs.TurnId, Cursor: obs.Cursor}
+		if wire != nil {
+			source.WireProvenance = proto.Clone(wire).(*model.WireProvenance)
+		}
+		if sourced {
+			source.ParamsSize = len(raw)
+		}
+		record := obs.GetSourceRecord()
+		if record == nil {
+			record = obs.GetExtension()
+		}
+		if sourced && record.GetType() == ACPUpdateParamsSource {
+			source.Params = append(json.RawMessage(nil), raw...)
+			if msg.update != nil {
+				end := msg.offset + len(msg.update)
+				source.Body = source.Params[msg.offset:end:end]
+			}
+		} else {
+			source.Body = append(json.RawMessage(nil), msg.update...)
+		}
+		capture(source)
 	}
 }
 
@@ -321,6 +351,11 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 	}
 	wire, _ := wireRecord(receipt, "session/request_permission", liveWindowBytes)
 	if wire.GetKind() != model.WireMessageKind_WIRE_MESSAGE_KIND_REQUEST || string(receipt.ID) == "null" {
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	if s.turn.cancellationSent {
+		s.emitWireSource(nil, "acp.permission_request", raw, wire)
 		s.mu.Unlock()
 		return cancel, nil
 	}
@@ -362,8 +397,10 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.permissions, id); s.mu.Unlock() }()
 	select {
-	case selected := <-pending.answer:
-		return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}}, nil
+	case selected, ok := <-pending.answer:
+		if ok {
+			return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}}, nil
+		}
 	case <-ctx.Done():
 	case <-t.done:
 	case <-s.p.runtime.ctx.Done():

@@ -294,10 +294,13 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	if r.config.SessionMeta != nil {
 		params["_meta"] = r.config.SessionMeta
 	}
-	if id == "" {
+	creating := id == ""
+	var configOptions []json.RawMessage
+	if creating {
+		s.beginSetup()
 		resp, err := rpc[struct {
 			SessionID     string
-			ConfigOptions []struct{ ID, Category, Type string }
+			ConfigOptions []json.RawMessage
 		}](ctx, p, "session/new", params)
 		if err != nil {
 			return nil, err
@@ -306,20 +309,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		if id == "" {
 			return nil, errors.New("adapter returned an empty session ID")
 		}
-		if modelID != "" {
-			method := "session/set_model"
-			values := map[string]any{"sessionId": id, "modelId": modelID}
-			for _, option := range resp.ConfigOptions {
-				if option.ID != "" && option.Category == "model" && option.Type == "select" {
-					method = "session/set_config_option"
-					values = map[string]any{"sessionId": id, "configId": option.ID, "value": modelID}
-					break
-				}
-			}
-			if _, err := rpc[empty](ctx, p, method, values); err != nil {
-				return nil, fmt.Errorf("select model: %w", err)
-			}
-		}
+		configOptions = resp.ConfigOptions
 	} else {
 		if !caps.CanResume {
 			return nil, errors.New("adapter does not support resuming sessions")
@@ -340,6 +330,16 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	s.info = info
 	s.wireSession.Store(&info.Ref.SessionId)
 	s.mu.Unlock()
+	if creating {
+		if modelID != "" {
+			if err := selectModel(ctx, p, id, modelID, configOptions); err != nil {
+				return nil, fmt.Errorf("select model: %w", err)
+			}
+		}
+		if err := s.finishSetup(); err != nil {
+			return nil, err
+		}
+	}
 	r.mu.Lock()
 	current := r.sessions[id]
 	if r.ctx.Err() != nil {

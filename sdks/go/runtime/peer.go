@@ -106,6 +106,14 @@ func (r *Runtime) connect(ctx context.Context, handle transport.MethodHandler, s
 }
 
 func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.MethodHandler, selectInbound func(method, sessionID string) bool, opts transport.Options) (*peer, handshake, error) {
+	return r.connectWithCapabilities(ctx, handle, selectInbound, opts, nil)
+}
+
+func (r *Runtime) connectActive(ctx context.Context, s *session) (*peer, handshake, error) {
+	return r.connectWithCapabilities(ctx, s.handle, s.selectWire, transport.Options{}, s.elicitation.cfg.capabilities())
+}
+
+func (r *Runtime) connectWithCapabilities(ctx context.Context, handle transport.MethodHandler, selectInbound func(method, sessionID string) bool, opts transport.Options, caps map[string]any) (*peer, handshake, error) {
 	var init handshake
 	if r.config.Command == "" {
 		return nil, init, errors.New("live operations require an adapter command")
@@ -163,7 +171,7 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 	if version == 0 {
 		version = 1
 	}
-	init, err = rpc[handshake](ctx, p, "initialize", r.config.initializeParams(version))
+	init, err = rpc[handshake](ctx, p, "initialize", r.config.initializeParams(version, caps))
 	if err != nil {
 		p.close()
 		return nil, init, err
@@ -173,7 +181,7 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 		return nil, init, fmt.Errorf("unsupported ACP protocol version %d", init.ProtocolVersion)
 	}
 	if version == 2 && init.ProtocolVersion == 1 {
-		init, err = rpc[handshake](ctx, p, "initialize", r.config.initializeParams(1))
+		init, err = rpc[handshake](ctx, p, "initialize", r.config.initializeParams(1, caps))
 		if err != nil || init.ProtocolVersion != 1 {
 			p.close()
 			if err != nil {
@@ -186,12 +194,15 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 	return p, init, nil
 }
 
-func (config Config) initializeParams(version int) map[string]any {
+func (config Config) initializeParams(version int, caps map[string]any) map[string]any {
+	if caps == nil {
+		caps = make(map[string]any)
+	}
 	info := map[string]string{"name": "agent-acp", "version": "1"}
 	if version == 2 {
-		return map[string]any{"protocolVersion": version, "info": info, "capabilities": empty{}}
+		return map[string]any{"protocolVersion": version, "info": info, "capabilities": caps}
 	}
-	capabilities := map[string]any{}
+	capabilities := caps
 	if config.ChildSessions {
 		capabilities["subagents"] = empty{}
 	}

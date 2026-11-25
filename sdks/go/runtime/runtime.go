@@ -55,6 +55,7 @@ type Config struct {
 	WorkingDirectory string
 	Env              map[string]string
 	MCPServers       []MCPServer
+	Elicitation      *Elicitation
 	Stderr           io.Writer
 	// ProtocolVersion opts in to negotiating wire version 2. Zero and one
 	// request stable ACP v1. The adapter can select v1 when offered v2.
@@ -357,7 +358,8 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		}
 	}
 	s := newSession()
-	p, init, err := r.connect(ctx, s.handle, s.selectWire)
+	s.elicitation.cfg = r.config.Elicitation
+	p, init, err := r.connectActive(ctx, s)
 	if err != nil {
 		return nil, err
 	}

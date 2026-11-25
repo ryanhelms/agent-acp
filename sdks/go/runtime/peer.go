@@ -159,7 +159,7 @@ func (p *peer) close() {
 }
 
 func (r *Runtime) capabilities(init handshake) *model.Capabilities {
-	return &model.Capabilities{CanResume: init.AgentCapabilities.LoadSession || init.AgentCapabilities.SessionCapabilities.Resume != nil, CanAnswer: true, CanInterrupt: true, CanReadHistory: r.config.ReadHistory != nil, CanListSessions: init.AgentCapabilities.SessionCapabilities.List != nil}
+	return &model.Capabilities{CanResume: init.AgentCapabilities.LoadSession || init.AgentCapabilities.SessionCapabilities.Resume != nil, CanAnswer: true, CanInterrupt: true, CanReadHistory: r.config.ReadHistory != nil || (r.config.ReplayHistory && init.AgentCapabilities.LoadSession), CanListSessions: init.AgentCapabilities.SessionCapabilities.List != nil}
 }
 
 func (r *Runtime) mcpServers() []map[string]any {

@@ -21,31 +21,45 @@ import (
 type session struct {
 	// The transport selects on its reader goroutine. It must not wait for a
 	// callback or a session operation that might itself need that reader.
-	wireSession atomic.Pointer[string]
-	wireTurn    atomic.Bool
-	cwd         string
-	mu          sync.Mutex
-	p           *peer
-	info        *model.Session
-	turn        *turn
-	permissions map[string]*permission
-	operations  map[string]operation
-	closed      bool
-	epoch       string
-	sequence    uint64
-	windowBytes int
-	events      []*model.Observation
-	changed     chan struct{}
+	wireSession     atomic.Pointer[string]
+	wireTurn        atomic.Bool
+	wireSetup       atomic.Bool
+	wireChildren    atomic.Bool
+	cwd             string
+	mu              sync.Mutex
+	p               *peer
+	info            *model.Session
+	turn            *turn
+	permissions     map[string]*permission
+	operations      map[string]operation
+	closed          bool
+	epoch           string
+	sequence        uint64
+	windowBytes     int
+	events          []*model.Observation
+	expiredControls []controlObservation
+	controlBytes    int
+	lostControl     uint64
+	changed         chan struct{}
+	setup           *sessionSetup
+	mcp             acpMCPBindings
+	elicitation     elicitationState
+	v2              *v2Session
+	children        childSessions
+	compactions     *compactionState
 }
 
 type turn struct {
-	id      string
-	written <-chan struct{}
-	done    chan struct{}
+	id               string
+	written          <-chan struct{}
+	done             chan struct{}
+	cancellationSent bool
+	v2               *v2Turn
 }
 type permission struct {
-	options map[string]bool
-	answer  chan string
+	options   map[string]bool
+	answer    chan string
+	cancelled <-chan struct{}
 }
 type operation struct {
 	digest  [32]byte
@@ -79,8 +93,9 @@ func (s *session) existing(id string, req proto.Message) (*model.Receipt, error)
 	return nil, nil
 }
 func fingerprint(req proto.Message) [32]byte {
-	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(req)
-	return sha256.Sum256(append([]byte(string(req.ProtoReflect().Descriptor().FullName())+"\x00"), b...))
+	prefix := []byte(string(req.ProtoReflect().Descriptor().FullName()) + "\x00")
+	encoded, _ := proto.MarshalOptions{Deterministic: true}.MarshalAppend(prefix, req)
+	return sha256.Sum256(encoded)
 }
 func (s *session) record(id string, req proto.Message, status model.DeliveryStatus, detail string) *model.Receipt {
 	receipt := &model.Receipt{OperationId: id, Status: status, Detail: detail}
@@ -97,16 +112,31 @@ func (s *session) send(q *model.SendRequest) (*model.Receipt, error) {
 	if s.turn != nil {
 		return nil, errors.New("session already has an active turn")
 	}
+	if s.v2 != nil && s.v2.foreground != "idle" {
+		return nil, errors.New("ACP v2 session is not confirmed idle")
+	}
+	if s.v2 != nil {
+		if err := validateV2OperationID(q.OperationId); err != nil {
+			return nil, err
+		}
+	}
 	blocks, preview, err := promptBlocks(q, s.info.Capabilities)
 	if err != nil {
 		return nil, err
 	}
 	t := &turn{id: q.OperationId, written: s.p.readyPrompt(), done: make(chan struct{})}
+	if s.v2 != nil {
+		t.v2 = &v2Turn{responseDone: make(chan struct{})}
+	}
 	s.turn = t
 	s.wireTurn.Store(true)
 	s.emit(&model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: model.Speaker_SPEAKER_USER, Text: preview}}})
 	receipt := s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "turn accepted")
-	go s.prompt(t, blocks)
+	if t.v2 != nil {
+		go s.promptV2(t, blocks)
+	} else {
+		go s.prompt(t, blocks)
+	}
 	return receipt, nil
 }
 
@@ -116,7 +146,7 @@ type receiptResult struct{}
 
 func (*receiptResult) UnmarshalJSON([]byte) error { return nil }
 
-func (s *session) prompt(t *turn, blocks []map[string]string) {
+func (s *session) prompt(t *turn, blocks []any) {
 	params := map[string]any{"sessionId": s.info.Ref.SessionId, "prompt": blocks}
 	_, receipt, err := transport.SendRequestWithReceipt[receiptResult](s.p.conn, s.p.runtime.ctx, "session/prompt", params)
 	wire, result := wireRecord(receipt, "session/prompt", liveWindowBytes)
@@ -165,10 +195,12 @@ func (s *session) end(reason, sourceType string, raw json.RawMessage, wire *mode
 	} else {
 		s.emit(event)
 	}
-	s.wireTurn.Store(false)
+	s.wireTurn.Store(s.v2 != nil)
 	close(s.turn.done)
 	s.turn = nil
-	clear(s.permissions)
+	if s.v2 == nil {
+		clear(s.permissions)
+	}
 }
 func (s *session) disconnect() {
 	s.mu.Lock()
@@ -178,8 +210,18 @@ func (s *session) disconnect() {
 		// peer exits immediately after writing it. Let the waiter publish the
 		// terminal receipt before closing the observation stream.
 		s.mu.Unlock()
-		<-t.done
+		if t.v2 != nil {
+			<-t.v2.responseDone
+		} else {
+			<-t.done
+		}
 		s.mu.Lock()
+		if s.turn == t {
+			if t.v2.messageID == "" {
+				s.unknown(t.id)
+			}
+			s.end("adapter disconnected", "", nil, nil)
+		}
 	}
 	s.wireSession.Store(nil)
 	s.closed = true
@@ -195,6 +237,11 @@ func (s *session) answer(q *model.AnswerRequest) (*model.Receipt, error) {
 	pending := s.permissions[q.RequestId]
 	if pending == nil {
 		return nil, errors.New("request is not pending in this session")
+	}
+	select {
+	case <-pending.cancelled:
+		return nil, errors.New("provider cancelled the request")
+	default:
 	}
 	selected, ok := q.Answer.(*model.AnswerRequest_OptionId)
 	if !ok || !pending.options[selected.OptionId] {
@@ -234,20 +281,46 @@ func (s *session) interrupt(ctx context.Context, q *model.InterruptRequest) (*mo
 	if s.turn != t {
 		return nil, errors.New("target turn ended")
 	}
+	if t.cancellationSent {
+		return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "cancellation already sent to adapter"), nil
+	}
 	err := s.p.conn.SendNotification(ctx, "session/cancel", map[string]string{"sessionId": s.info.Ref.SessionId})
 	if err != nil {
 		return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_UNKNOWN, err.Error()), nil
+	}
+	t.cancellationSent = true
+	// The peer may need these replies before it can finish the original prompt.
+	// Only unanswered permissions are in the map, so each waiter can be settled once.
+	if t.v2 == nil {
+		for _, pending := range s.permissions {
+			close(pending.answer)
+		}
+		clear(s.permissions)
 	}
 	return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "cancellation sent to adapter"), nil
 }
 
 func (s *session) selectWire(method, sessionID string) bool {
+	if s.wireChildren.Load() && (method == "session/update" || method == "session/request_permission") {
+		return true
+	}
+	if method == "session/update" && s.wireSetup.Load() {
+		// The reply and first announcement can arrive in the same pipe read.
+		// finishSetup publishes only the ID selected by the matched reply.
+		return true
+	}
 	id := s.wireSession.Load()
 	return id != nil && *id == sessionID && (method == "session/update" || (method == "session/request_permission" && s.wireTurn.Load()))
 }
 
 func (s *session) handle(ctx context.Context, method string, raw json.RawMessage) (any, *acp.RequestError) {
 	switch method {
+	case acpMCPMethod:
+		return s.handleMCPACP(ctx, raw)
+	case "elicitation/create":
+		return s.createElicitation(ctx, raw)
+	case "elicitation/complete":
+		return s.completeElicitation(ctx, raw)
 	case "session/update":
 		msg, err := decodeUpdateParams(raw)
 		if err != nil {
@@ -255,47 +328,18 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		// Setup and load replay cannot create live observations or actions.
-		if s.info == nil || s.closed || msg.id == "" || msg.id != s.info.Ref.SessionId {
+		if s.closed || msg.id == "" {
+			return nil, nil
+		}
+		if s.setup == nil && s.info == nil {
+			// Load replay has its own passive reader.
 			return nil, nil
 		}
 		wire, _ := wireRecord(transport.InboundReceipt(ctx, method, msg.id), method, liveWindowBytes)
-		sourced := msg.extra || wire != nil
-		obs := normalizeUpdate(msg.update)
-		if sourced {
-			// A non-portable variant is itself passive evidence. Keep its
-			// full params once, including null, missing and unknown updates.
-			if obs == nil || obs.GetExtension() != nil {
-				obs = nil
-			}
-			obs = s.emitWireSource(obs, ACPUpdateParamsSource, raw, wire)
-		} else if obs != nil {
-			s.emit(obs)
+		if s.setup != nil {
+			s.setup.add(msg, raw, wire)
 		} else {
-			return nil, nil
-		}
-		if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
-			source := ACPUpdate{Session: &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: msg.id}, TurnID: obs.TurnId, Cursor: obs.Cursor}
-			if wire != nil {
-				source.WireProvenance = proto.Clone(wire).(*model.WireProvenance)
-			}
-			if sourced {
-				source.ParamsSize = len(raw)
-			}
-			record := obs.GetSourceRecord()
-			if record == nil {
-				record = obs.GetExtension()
-			}
-			if sourced && record.GetType() == ACPUpdateParamsSource {
-				source.Params = append(json.RawMessage(nil), raw...)
-				if msg.update != nil {
-					end := msg.offset + len(msg.update)
-					source.Body = source.Params[msg.offset:end:end]
-				}
-			} else {
-				source.Body = append(json.RawMessage(nil), msg.update...)
-			}
-			capture(source)
+			s.routeUpdate(msg, raw, wire)
 		}
 		return nil, nil
 	case "session/request_permission":
@@ -305,22 +349,98 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 	}
 }
 
+// publishUpdate runs with s.mu held, preserving observer and source callback order.
+func (s *session) publishUpdate(msg updateParams, raw json.RawMessage, wire *model.WireProvenance) {
+	sourced := msg.extra || wire != nil
+	obs := normalizeUpdate(msg.update)
+	if s.v2 != nil {
+		sourced = true
+		obs = s.normalizeV2(msg.update, obs)
+	}
+	if s.compactions != nil {
+		if compaction := s.compactions.observe(msg.update, s.sequence+1); compaction != nil {
+			sourced = true
+			obs = compaction
+		}
+	}
+	if sourced {
+		// A non-portable variant is itself passive evidence. Keep its
+		// full params once, including null, missing and unknown updates.
+		if obs == nil || obs.GetExtension() != nil && obs.GetExtension().GetType() != ACPV2MessageStateSource &&
+			obs.GetExtension().GetType() != ACPCompactionStateSource {
+			obs = nil
+		}
+		obs = s.emitWireSource(obs, ACPUpdateParamsSource, raw, wire)
+	} else if obs != nil {
+		s.emit(obs)
+	} else {
+		return
+	}
+	if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
+		source := ACPUpdate{Session: &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: msg.id}, TurnID: obs.TurnId, Cursor: obs.Cursor}
+		if wire != nil {
+			source.WireProvenance = proto.Clone(wire).(*model.WireProvenance)
+		}
+		if sourced {
+			source.ParamsSize = len(raw)
+		}
+		record := obs.GetSourceRecord()
+		if record == nil {
+			record = obs.GetExtension()
+		}
+		if sourced && record.GetType() == ACPUpdateParamsSource {
+			source.Params = append(json.RawMessage(nil), raw...)
+			if msg.update != nil {
+				end := msg.offset + len(msg.update)
+				source.Body = source.Params[msg.offset:end:end]
+			}
+		} else {
+			source.Body = append(json.RawMessage(nil), msg.update...)
+		}
+		capture(source)
+	}
+	if s.v2 != nil {
+		s.updateV2State(msg.update, raw, wire)
+	}
+}
+
 func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (any, *acp.RequestError) {
 	var msg struct {
-		SessionID string
-		ToolCall  struct{ Title, ToolCallID string }
-		Options   []struct{ OptionID, Name, Kind string }
+		SessionID, Title string
+		ToolCall         struct{ Title, ToolCallID string }
+		Subject          struct {
+			Type     string
+			ToolCall json.RawMessage
+		}
+		Options []struct{ OptionID, Name, Kind string }
 	}
 	decodeErr := json.Unmarshal(raw, &msg)
 	receipt := transport.InboundReceipt(ctx, "session/request_permission", msg.SessionID)
 	cancel := map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
 	s.mu.Lock()
-	if receipt == nil || s.info == nil || s.closed || s.info.Ref.SessionId != msg.SessionID || s.turn == nil {
+	if receipt == nil || s.info == nil || s.closed || s.setup != nil {
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	if s.info.Ref.SessionId != msg.SessionID {
+		if _, known := s.children[msg.SessionID]; known {
+			wire, _ := wireRecord(receipt, "session/request_permission", liveWindowBytes)
+			s.emitWireSource(nil, ACPChildPermissionSource, raw, wire)
+		}
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	if s.turn == nil && s.v2 == nil {
 		s.mu.Unlock()
 		return cancel, nil
 	}
 	wire, _ := wireRecord(receipt, "session/request_permission", liveWindowBytes)
 	if wire.GetKind() != model.WireMessageKind_WIRE_MESSAGE_KIND_REQUEST || string(receipt.ID) == "null" {
+		s.mu.Unlock()
+		return cancel, nil
+	}
+	if s.v2 == nil && s.turn.cancellationSent {
+		s.emitWireSource(nil, "acp.permission_request", raw, wire)
 		s.mu.Unlock()
 		return cancel, nil
 	}
@@ -334,7 +454,16 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 	t := s.turn
 	id := identifier()
 	pending := &permission{options: map[string]bool{}, answer: make(chan string, 1)}
+	if s.v2 != nil {
+		pending.cancelled = ctx.Done()
+	}
 	req := &model.InputRequest{RequestId: id, Prompt: msg.ToolCall.Title}
+	if s.v2 != nil {
+		req.Prompt = msg.Title
+		if msg.Subject.Type == "tool_call" {
+			s.emitV2ToolSubject(msg.Subject.ToolCall)
+		}
+	}
 	if req.Prompt == "" {
 		req.Prompt = fmt.Sprintf("Allow %s?", msg.ToolCall.ToolCallID)
 	}
@@ -361,11 +490,20 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 	s.permissions[id] = pending
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.permissions, id); s.mu.Unlock() }()
+	var turnDone <-chan struct{}
+	if s.v2 == nil {
+		turnDone = t.done
+	}
 	select {
-	case selected := <-pending.answer:
-		return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}}, nil
+	case selected, ok := <-pending.answer:
+		if ok {
+			return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}}, nil
+		}
 	case <-ctx.Done():
-	case <-t.done:
+		if s.v2 != nil {
+			s.dismissV2Permission(id, pending)
+		}
+	case <-turnDone:
 	case <-s.p.runtime.ctx.Done():
 	}
 	return cancel, nil

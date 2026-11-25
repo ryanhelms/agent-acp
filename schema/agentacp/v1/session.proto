@@ -32,6 +32,7 @@ message Capabilities {
   bool can_read_history = 5;
   bool can_prompt_image = 6;
   bool can_prompt_audio = 7;
+  bool can_prompt_embedded_context = 8;
 }
 
 message Session {
@@ -83,11 +84,26 @@ message PromptPart {
     string text = 1;
     PromptMedia image = 2;
     PromptMedia audio = 3;
+    PromptResourceLink resource_link = 4;
+    PromptResource resource = 5;
   }
 }
 message PromptMedia {
   string mime_type = 1;
   bytes data = 2;
+}
+message PromptResourceLink {
+  string uri = 1;
+  string name = 2;
+  string mime_type = 3;
+}
+message PromptResource {
+  string uri = 1;
+  string mime_type = 2;
+  oneof body {
+    string text = 3;
+    bytes blob = 4;
+  }
 }
 message SendResponse {
   Receipt receipt = 1;

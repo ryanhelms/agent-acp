@@ -241,16 +241,17 @@ func (x *SessionRef) GetSessionId() string {
 }
 
 type Capabilities struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	CanResume       bool                   `protobuf:"varint,1,opt,name=can_resume,json=canResume,proto3" json:"can_resume,omitempty"`
-	CanAnswer       bool                   `protobuf:"varint,2,opt,name=can_answer,json=canAnswer,proto3" json:"can_answer,omitempty"`
-	CanInterrupt    bool                   `protobuf:"varint,3,opt,name=can_interrupt,json=canInterrupt,proto3" json:"can_interrupt,omitempty"`
-	CanListSessions bool                   `protobuf:"varint,4,opt,name=can_list_sessions,json=canListSessions,proto3" json:"can_list_sessions,omitempty"`
-	CanReadHistory  bool                   `protobuf:"varint,5,opt,name=can_read_history,json=canReadHistory,proto3" json:"can_read_history,omitempty"`
-	CanPromptImage  bool                   `protobuf:"varint,6,opt,name=can_prompt_image,json=canPromptImage,proto3" json:"can_prompt_image,omitempty"`
-	CanPromptAudio  bool                   `protobuf:"varint,7,opt,name=can_prompt_audio,json=canPromptAudio,proto3" json:"can_prompt_audio,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state                    protoimpl.MessageState `protogen:"open.v1"`
+	CanResume                bool                   `protobuf:"varint,1,opt,name=can_resume,json=canResume,proto3" json:"can_resume,omitempty"`
+	CanAnswer                bool                   `protobuf:"varint,2,opt,name=can_answer,json=canAnswer,proto3" json:"can_answer,omitempty"`
+	CanInterrupt             bool                   `protobuf:"varint,3,opt,name=can_interrupt,json=canInterrupt,proto3" json:"can_interrupt,omitempty"`
+	CanListSessions          bool                   `protobuf:"varint,4,opt,name=can_list_sessions,json=canListSessions,proto3" json:"can_list_sessions,omitempty"`
+	CanReadHistory           bool                   `protobuf:"varint,5,opt,name=can_read_history,json=canReadHistory,proto3" json:"can_read_history,omitempty"`
+	CanPromptImage           bool                   `protobuf:"varint,6,opt,name=can_prompt_image,json=canPromptImage,proto3" json:"can_prompt_image,omitempty"`
+	CanPromptAudio           bool                   `protobuf:"varint,7,opt,name=can_prompt_audio,json=canPromptAudio,proto3" json:"can_prompt_audio,omitempty"`
+	CanPromptEmbeddedContext bool                   `protobuf:"varint,8,opt,name=can_prompt_embedded_context,json=canPromptEmbeddedContext,proto3" json:"can_prompt_embedded_context,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *Capabilities) Reset() {
@@ -328,6 +329,13 @@ func (x *Capabilities) GetCanPromptImage() bool {
 func (x *Capabilities) GetCanPromptAudio() bool {
 	if x != nil {
 		return x.CanPromptAudio
+	}
+	return false
+}
+
+func (x *Capabilities) GetCanPromptEmbeddedContext() bool {
+	if x != nil {
+		return x.CanPromptEmbeddedContext
 	}
 	return false
 }
@@ -723,6 +731,8 @@ type PromptPart struct {
 	//	*PromptPart_Text
 	//	*PromptPart_Image
 	//	*PromptPart_Audio
+	//	*PromptPart_ResourceLink
+	//	*PromptPart_Resource
 	Content       isPromptPart_Content `protobuf_oneof:"content"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -792,6 +802,24 @@ func (x *PromptPart) GetAudio() *PromptMedia {
 	return nil
 }
 
+func (x *PromptPart) GetResourceLink() *PromptResourceLink {
+	if x != nil {
+		if x, ok := x.Content.(*PromptPart_ResourceLink); ok {
+			return x.ResourceLink
+		}
+	}
+	return nil
+}
+
+func (x *PromptPart) GetResource() *PromptResource {
+	if x != nil {
+		if x, ok := x.Content.(*PromptPart_Resource); ok {
+			return x.Resource
+		}
+	}
+	return nil
+}
+
 type isPromptPart_Content interface {
 	isPromptPart_Content()
 }
@@ -808,11 +836,23 @@ type PromptPart_Audio struct {
 	Audio *PromptMedia `protobuf:"bytes,3,opt,name=audio,proto3,oneof"`
 }
 
+type PromptPart_ResourceLink struct {
+	ResourceLink *PromptResourceLink `protobuf:"bytes,4,opt,name=resource_link,json=resourceLink,proto3,oneof"`
+}
+
+type PromptPart_Resource struct {
+	Resource *PromptResource `protobuf:"bytes,5,opt,name=resource,proto3,oneof"`
+}
+
 func (*PromptPart_Text) isPromptPart_Content() {}
 
 func (*PromptPart_Image) isPromptPart_Content() {}
 
 func (*PromptPart_Audio) isPromptPart_Content() {}
+
+func (*PromptPart_ResourceLink) isPromptPart_Content() {}
+
+func (*PromptPart_Resource) isPromptPart_Content() {}
 
 type PromptMedia struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -866,6 +906,164 @@ func (x *PromptMedia) GetData() []byte {
 	return nil
 }
 
+type PromptResourceLink struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Uri           string                 `protobuf:"bytes,1,opt,name=uri,proto3" json:"uri,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	MimeType      string                 `protobuf:"bytes,3,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptResourceLink) Reset() {
+	*x = PromptResourceLink{}
+	mi := &file_agentacp_v1_session_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptResourceLink) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptResourceLink) ProtoMessage() {}
+
+func (x *PromptResourceLink) ProtoReflect() protoreflect.Message {
+	mi := &file_agentacp_v1_session_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptResourceLink.ProtoReflect.Descriptor instead.
+func (*PromptResourceLink) Descriptor() ([]byte, []int) {
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PromptResourceLink) GetUri() string {
+	if x != nil {
+		return x.Uri
+	}
+	return ""
+}
+
+func (x *PromptResourceLink) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PromptResourceLink) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+type PromptResource struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Uri      string                 `protobuf:"bytes,1,opt,name=uri,proto3" json:"uri,omitempty"`
+	MimeType string                 `protobuf:"bytes,2,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	// Types that are valid to be assigned to Body:
+	//
+	//	*PromptResource_Text
+	//	*PromptResource_Blob
+	Body          isPromptResource_Body `protobuf_oneof:"body"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromptResource) Reset() {
+	*x = PromptResource{}
+	mi := &file_agentacp_v1_session_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromptResource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromptResource) ProtoMessage() {}
+
+func (x *PromptResource) ProtoReflect() protoreflect.Message {
+	mi := &file_agentacp_v1_session_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromptResource.ProtoReflect.Descriptor instead.
+func (*PromptResource) Descriptor() ([]byte, []int) {
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PromptResource) GetUri() string {
+	if x != nil {
+		return x.Uri
+	}
+	return ""
+}
+
+func (x *PromptResource) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *PromptResource) GetBody() isPromptResource_Body {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *PromptResource) GetText() string {
+	if x != nil {
+		if x, ok := x.Body.(*PromptResource_Text); ok {
+			return x.Text
+		}
+	}
+	return ""
+}
+
+func (x *PromptResource) GetBlob() []byte {
+	if x != nil {
+		if x, ok := x.Body.(*PromptResource_Blob); ok {
+			return x.Blob
+		}
+	}
+	return nil
+}
+
+type isPromptResource_Body interface {
+	isPromptResource_Body()
+}
+
+type PromptResource_Text struct {
+	Text string `protobuf:"bytes,3,opt,name=text,proto3,oneof"`
+}
+
+type PromptResource_Blob struct {
+	Blob []byte `protobuf:"bytes,4,opt,name=blob,proto3,oneof"`
+}
+
+func (*PromptResource_Text) isPromptResource_Body() {}
+
+func (*PromptResource_Blob) isPromptResource_Body() {}
+
 type SendResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Receipt       *Receipt               `protobuf:"bytes,1,opt,name=receipt,proto3" json:"receipt,omitempty"`
@@ -875,7 +1073,7 @@ type SendResponse struct {
 
 func (x *SendResponse) Reset() {
 	*x = SendResponse{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[11]
+	mi := &file_agentacp_v1_session_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -887,7 +1085,7 @@ func (x *SendResponse) String() string {
 func (*SendResponse) ProtoMessage() {}
 
 func (x *SendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[11]
+	mi := &file_agentacp_v1_session_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -900,7 +1098,7 @@ func (x *SendResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendResponse.ProtoReflect.Descriptor instead.
 func (*SendResponse) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{11}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SendResponse) GetReceipt() *Receipt {
@@ -926,7 +1124,7 @@ type AnswerRequest struct {
 
 func (x *AnswerRequest) Reset() {
 	*x = AnswerRequest{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[12]
+	mi := &file_agentacp_v1_session_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -938,7 +1136,7 @@ func (x *AnswerRequest) String() string {
 func (*AnswerRequest) ProtoMessage() {}
 
 func (x *AnswerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[12]
+	mi := &file_agentacp_v1_session_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -951,7 +1149,7 @@ func (x *AnswerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnswerRequest.ProtoReflect.Descriptor instead.
 func (*AnswerRequest) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{12}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *AnswerRequest) GetSession() *SessionRef {
@@ -1025,7 +1223,7 @@ type AnswerResponse struct {
 
 func (x *AnswerResponse) Reset() {
 	*x = AnswerResponse{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[13]
+	mi := &file_agentacp_v1_session_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1037,7 +1235,7 @@ func (x *AnswerResponse) String() string {
 func (*AnswerResponse) ProtoMessage() {}
 
 func (x *AnswerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[13]
+	mi := &file_agentacp_v1_session_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1050,7 +1248,7 @@ func (x *AnswerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnswerResponse.ProtoReflect.Descriptor instead.
 func (*AnswerResponse) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{13}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *AnswerResponse) GetReceipt() *Receipt {
@@ -1071,7 +1269,7 @@ type InterruptRequest struct {
 
 func (x *InterruptRequest) Reset() {
 	*x = InterruptRequest{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[14]
+	mi := &file_agentacp_v1_session_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1083,7 +1281,7 @@ func (x *InterruptRequest) String() string {
 func (*InterruptRequest) ProtoMessage() {}
 
 func (x *InterruptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[14]
+	mi := &file_agentacp_v1_session_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1096,7 +1294,7 @@ func (x *InterruptRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptRequest.ProtoReflect.Descriptor instead.
 func (*InterruptRequest) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{14}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *InterruptRequest) GetSession() *SessionRef {
@@ -1129,7 +1327,7 @@ type InterruptResponse struct {
 
 func (x *InterruptResponse) Reset() {
 	*x = InterruptResponse{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[15]
+	mi := &file_agentacp_v1_session_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1141,7 +1339,7 @@ func (x *InterruptResponse) String() string {
 func (*InterruptResponse) ProtoMessage() {}
 
 func (x *InterruptResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[15]
+	mi := &file_agentacp_v1_session_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1154,7 +1352,7 @@ func (x *InterruptResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InterruptResponse.ProtoReflect.Descriptor instead.
 func (*InterruptResponse) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{15}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *InterruptResponse) GetReceipt() *Receipt {
@@ -1174,7 +1372,7 @@ type ObserveRequest struct {
 
 func (x *ObserveRequest) Reset() {
 	*x = ObserveRequest{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[16]
+	mi := &file_agentacp_v1_session_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1186,7 +1384,7 @@ func (x *ObserveRequest) String() string {
 func (*ObserveRequest) ProtoMessage() {}
 
 func (x *ObserveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[16]
+	mi := &file_agentacp_v1_session_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1199,7 +1397,7 @@ func (x *ObserveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObserveRequest.ProtoReflect.Descriptor instead.
 func (*ObserveRequest) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{16}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ObserveRequest) GetSession() *SessionRef {
@@ -1226,7 +1424,7 @@ type TextUpdate struct {
 
 func (x *TextUpdate) Reset() {
 	*x = TextUpdate{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[17]
+	mi := &file_agentacp_v1_session_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1238,7 +1436,7 @@ func (x *TextUpdate) String() string {
 func (*TextUpdate) ProtoMessage() {}
 
 func (x *TextUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[17]
+	mi := &file_agentacp_v1_session_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1251,7 +1449,7 @@ func (x *TextUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextUpdate.ProtoReflect.Descriptor instead.
 func (*TextUpdate) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{17}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *TextUpdate) GetSpeaker() Speaker {
@@ -1280,7 +1478,7 @@ type ToolActivity struct {
 
 func (x *ToolActivity) Reset() {
 	*x = ToolActivity{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[18]
+	mi := &file_agentacp_v1_session_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1292,7 +1490,7 @@ func (x *ToolActivity) String() string {
 func (*ToolActivity) ProtoMessage() {}
 
 func (x *ToolActivity) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[18]
+	mi := &file_agentacp_v1_session_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1305,7 +1503,7 @@ func (x *ToolActivity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolActivity.ProtoReflect.Descriptor instead.
 func (*ToolActivity) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{18}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ToolActivity) GetCallId() string {
@@ -1346,7 +1544,7 @@ type Choice struct {
 
 func (x *Choice) Reset() {
 	*x = Choice{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[19]
+	mi := &file_agentacp_v1_session_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1358,7 +1556,7 @@ func (x *Choice) String() string {
 func (*Choice) ProtoMessage() {}
 
 func (x *Choice) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[19]
+	mi := &file_agentacp_v1_session_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1371,7 +1569,7 @@ func (x *Choice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Choice.ProtoReflect.Descriptor instead.
 func (*Choice) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{19}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Choice) GetId() string {
@@ -1399,7 +1597,7 @@ type InputRequest struct {
 
 func (x *InputRequest) Reset() {
 	*x = InputRequest{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[20]
+	mi := &file_agentacp_v1_session_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1411,7 +1609,7 @@ func (x *InputRequest) String() string {
 func (*InputRequest) ProtoMessage() {}
 
 func (x *InputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[20]
+	mi := &file_agentacp_v1_session_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1424,7 +1622,7 @@ func (x *InputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InputRequest.ProtoReflect.Descriptor instead.
 func (*InputRequest) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{20}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *InputRequest) GetRequestId() string {
@@ -1457,7 +1655,7 @@ type TurnEnded struct {
 
 func (x *TurnEnded) Reset() {
 	*x = TurnEnded{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[21]
+	mi := &file_agentacp_v1_session_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1469,7 +1667,7 @@ func (x *TurnEnded) String() string {
 func (*TurnEnded) ProtoMessage() {}
 
 func (x *TurnEnded) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[21]
+	mi := &file_agentacp_v1_session_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1482,7 +1680,7 @@ func (x *TurnEnded) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TurnEnded.ProtoReflect.Descriptor instead.
 func (*TurnEnded) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{21}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *TurnEnded) GetReason() string {
@@ -1501,7 +1699,7 @@ type HistoryGap struct {
 
 func (x *HistoryGap) Reset() {
 	*x = HistoryGap{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[22]
+	mi := &file_agentacp_v1_session_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1513,7 +1711,7 @@ func (x *HistoryGap) String() string {
 func (*HistoryGap) ProtoMessage() {}
 
 func (x *HistoryGap) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[22]
+	mi := &file_agentacp_v1_session_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1526,7 +1724,7 @@ func (x *HistoryGap) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryGap.ProtoReflect.Descriptor instead.
 func (*HistoryGap) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{22}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *HistoryGap) GetReason() string {
@@ -1547,7 +1745,7 @@ type Extension struct {
 
 func (x *Extension) Reset() {
 	*x = Extension{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[23]
+	mi := &file_agentacp_v1_session_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1559,7 +1757,7 @@ func (x *Extension) String() string {
 func (*Extension) ProtoMessage() {}
 
 func (x *Extension) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[23]
+	mi := &file_agentacp_v1_session_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1572,7 +1770,7 @@ func (x *Extension) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Extension.ProtoReflect.Descriptor instead.
 func (*Extension) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{23}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *Extension) GetType() string {
@@ -1624,7 +1822,7 @@ type WireProvenance struct {
 
 func (x *WireProvenance) Reset() {
 	*x = WireProvenance{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[24]
+	mi := &file_agentacp_v1_session_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1636,7 +1834,7 @@ func (x *WireProvenance) String() string {
 func (*WireProvenance) ProtoMessage() {}
 
 func (x *WireProvenance) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[24]
+	mi := &file_agentacp_v1_session_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1649,7 +1847,7 @@ func (x *WireProvenance) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WireProvenance.ProtoReflect.Descriptor instead.
 func (*WireProvenance) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{24}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *WireProvenance) GetKind() WireMessageKind {
@@ -1756,7 +1954,7 @@ type Observation struct {
 
 func (x *Observation) Reset() {
 	*x = Observation{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[25]
+	mi := &file_agentacp_v1_session_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1768,7 +1966,7 @@ func (x *Observation) String() string {
 func (*Observation) ProtoMessage() {}
 
 func (x *Observation) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[25]
+	mi := &file_agentacp_v1_session_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1781,7 +1979,7 @@ func (x *Observation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Observation.ProtoReflect.Descriptor instead.
 func (*Observation) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{25}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *Observation) GetSession() *SessionRef {
@@ -1939,7 +2137,7 @@ type ListSessionsRequest struct {
 
 func (x *ListSessionsRequest) Reset() {
 	*x = ListSessionsRequest{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[26]
+	mi := &file_agentacp_v1_session_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1951,7 +2149,7 @@ func (x *ListSessionsRequest) String() string {
 func (*ListSessionsRequest) ProtoMessage() {}
 
 func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[26]
+	mi := &file_agentacp_v1_session_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1964,7 +2162,7 @@ func (x *ListSessionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsRequest.ProtoReflect.Descriptor instead.
 func (*ListSessionsRequest) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{26}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ListSessionsRequest) GetHarnessInstance() string {
@@ -2005,7 +2203,7 @@ type ListSessionsResponse struct {
 
 func (x *ListSessionsResponse) Reset() {
 	*x = ListSessionsResponse{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[27]
+	mi := &file_agentacp_v1_session_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2017,7 +2215,7 @@ func (x *ListSessionsResponse) String() string {
 func (*ListSessionsResponse) ProtoMessage() {}
 
 func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[27]
+	mi := &file_agentacp_v1_session_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2030,7 +2228,7 @@ func (x *ListSessionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSessionsResponse.ProtoReflect.Descriptor instead.
 func (*ListSessionsResponse) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{27}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ListSessionsResponse) GetSessions() []*Session {
@@ -2060,7 +2258,7 @@ type ReadHistoryRequest struct {
 
 func (x *ReadHistoryRequest) Reset() {
 	*x = ReadHistoryRequest{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[28]
+	mi := &file_agentacp_v1_session_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2072,7 +2270,7 @@ func (x *ReadHistoryRequest) String() string {
 func (*ReadHistoryRequest) ProtoMessage() {}
 
 func (x *ReadHistoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[28]
+	mi := &file_agentacp_v1_session_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2085,7 +2283,7 @@ func (x *ReadHistoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadHistoryRequest.ProtoReflect.Descriptor instead.
 func (*ReadHistoryRequest) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{28}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ReadHistoryRequest) GetSession() *SessionRef {
@@ -2119,7 +2317,7 @@ type ReadHistoryResponse struct {
 
 func (x *ReadHistoryResponse) Reset() {
 	*x = ReadHistoryResponse{}
-	mi := &file_agentacp_v1_session_proto_msgTypes[29]
+	mi := &file_agentacp_v1_session_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2131,7 +2329,7 @@ func (x *ReadHistoryResponse) String() string {
 func (*ReadHistoryResponse) ProtoMessage() {}
 
 func (x *ReadHistoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agentacp_v1_session_proto_msgTypes[29]
+	mi := &file_agentacp_v1_session_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2144,7 +2342,7 @@ func (x *ReadHistoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadHistoryResponse.ProtoReflect.Descriptor instead.
 func (*ReadHistoryResponse) Descriptor() ([]byte, []int) {
-	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{29}
+	return file_agentacp_v1_session_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ReadHistoryResponse) GetObservations() []*Observation {
@@ -2170,7 +2368,7 @@ const file_agentacp_v1_session_proto_rawDesc = "" +
 	"SessionRef\x12)\n" +
 	"\x10harness_instance\x18\x01 \x01(\tR\x0fharnessInstance\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x02 \x01(\tR\tsessionId\"\x9b\x02\n" +
+	"session_id\x18\x02 \x01(\tR\tsessionId\"\xda\x02\n" +
 	"\fCapabilities\x12\x1d\n" +
 	"\n" +
 	"can_resume\x18\x01 \x01(\bR\tcanResume\x12\x1d\n" +
@@ -2180,7 +2378,8 @@ const file_agentacp_v1_session_proto_rawDesc = "" +
 	"\x11can_list_sessions\x18\x04 \x01(\bR\x0fcanListSessions\x12(\n" +
 	"\x10can_read_history\x18\x05 \x01(\bR\x0ecanReadHistory\x12(\n" +
 	"\x10can_prompt_image\x18\x06 \x01(\bR\x0ecanPromptImage\x12(\n" +
-	"\x10can_prompt_audio\x18\a \x01(\bR\x0ecanPromptAudio\"\x96\x01\n" +
+	"\x10can_prompt_audio\x18\a \x01(\bR\x0ecanPromptAudio\x12=\n" +
+	"\x1bcan_prompt_embedded_context\x18\b \x01(\bR\x18canPromptEmbeddedContext\"\x96\x01\n" +
 	"\aSession\x12)\n" +
 	"\x03ref\x18\x01 \x01(\v2\x17.agentacp.v1.SessionRefR\x03ref\x12=\n" +
 	"\fcapabilities\x18\x02 \x01(\v2\x19.agentacp.v1.CapabilitiesR\fcapabilities\x12!\n" +
@@ -2203,16 +2402,28 @@ const file_agentacp_v1_session_proto_rawDesc = "" +
 	"\asession\x18\x01 \x01(\v2\x17.agentacp.v1.SessionRefR\asession\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12\x12\n" +
 	"\x04text\x18\x03 \x01(\tR\x04text\x12-\n" +
-	"\x05parts\x18\x04 \x03(\v2\x17.agentacp.v1.PromptPartR\x05parts\"\x91\x01\n" +
+	"\x05parts\x18\x04 \x03(\v2\x17.agentacp.v1.PromptPartR\x05parts\"\x94\x02\n" +
 	"\n" +
 	"PromptPart\x12\x14\n" +
 	"\x04text\x18\x01 \x01(\tH\x00R\x04text\x120\n" +
 	"\x05image\x18\x02 \x01(\v2\x18.agentacp.v1.PromptMediaH\x00R\x05image\x120\n" +
-	"\x05audio\x18\x03 \x01(\v2\x18.agentacp.v1.PromptMediaH\x00R\x05audioB\t\n" +
+	"\x05audio\x18\x03 \x01(\v2\x18.agentacp.v1.PromptMediaH\x00R\x05audio\x12F\n" +
+	"\rresource_link\x18\x04 \x01(\v2\x1f.agentacp.v1.PromptResourceLinkH\x00R\fresourceLink\x129\n" +
+	"\bresource\x18\x05 \x01(\v2\x1b.agentacp.v1.PromptResourceH\x00R\bresourceB\t\n" +
 	"\acontent\">\n" +
 	"\vPromptMedia\x12\x1b\n" +
 	"\tmime_type\x18\x01 \x01(\tR\bmimeType\x12\x12\n" +
-	"\x04data\x18\x02 \x01(\fR\x04data\">\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"W\n" +
+	"\x12PromptResourceLink\x12\x10\n" +
+	"\x03uri\x18\x01 \x01(\tR\x03uri\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1b\n" +
+	"\tmime_type\x18\x03 \x01(\tR\bmimeType\"s\n" +
+	"\x0ePromptResource\x12\x10\n" +
+	"\x03uri\x18\x01 \x01(\tR\x03uri\x12\x1b\n" +
+	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x14\n" +
+	"\x04text\x18\x03 \x01(\tH\x00R\x04text\x12\x14\n" +
+	"\x04blob\x18\x04 \x01(\fH\x00R\x04blobB\x06\n" +
+	"\x04body\">\n" +
 	"\fSendResponse\x12.\n" +
 	"\areceipt\x18\x01 \x01(\v2\x14.agentacp.v1.ReceiptR\areceipt\"\xc3\x01\n" +
 	"\rAnswerRequest\x121\n" +
@@ -2350,7 +2561,7 @@ func file_agentacp_v1_session_proto_rawDescGZIP() []byte {
 }
 
 var file_agentacp_v1_session_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_agentacp_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_agentacp_v1_session_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_agentacp_v1_session_proto_goTypes = []any{
 	(DeliveryStatus)(0),          // 0: agentacp.v1.DeliveryStatus
 	(Speaker)(0),                 // 1: agentacp.v1.Speaker
@@ -2366,25 +2577,27 @@ var file_agentacp_v1_session_proto_goTypes = []any{
 	(*SendRequest)(nil),          // 11: agentacp.v1.SendRequest
 	(*PromptPart)(nil),           // 12: agentacp.v1.PromptPart
 	(*PromptMedia)(nil),          // 13: agentacp.v1.PromptMedia
-	(*SendResponse)(nil),         // 14: agentacp.v1.SendResponse
-	(*AnswerRequest)(nil),        // 15: agentacp.v1.AnswerRequest
-	(*AnswerResponse)(nil),       // 16: agentacp.v1.AnswerResponse
-	(*InterruptRequest)(nil),     // 17: agentacp.v1.InterruptRequest
-	(*InterruptResponse)(nil),    // 18: agentacp.v1.InterruptResponse
-	(*ObserveRequest)(nil),       // 19: agentacp.v1.ObserveRequest
-	(*TextUpdate)(nil),           // 20: agentacp.v1.TextUpdate
-	(*ToolActivity)(nil),         // 21: agentacp.v1.ToolActivity
-	(*Choice)(nil),               // 22: agentacp.v1.Choice
-	(*InputRequest)(nil),         // 23: agentacp.v1.InputRequest
-	(*TurnEnded)(nil),            // 24: agentacp.v1.TurnEnded
-	(*HistoryGap)(nil),           // 25: agentacp.v1.HistoryGap
-	(*Extension)(nil),            // 26: agentacp.v1.Extension
-	(*WireProvenance)(nil),       // 27: agentacp.v1.WireProvenance
-	(*Observation)(nil),          // 28: agentacp.v1.Observation
-	(*ListSessionsRequest)(nil),  // 29: agentacp.v1.ListSessionsRequest
-	(*ListSessionsResponse)(nil), // 30: agentacp.v1.ListSessionsResponse
-	(*ReadHistoryRequest)(nil),   // 31: agentacp.v1.ReadHistoryRequest
-	(*ReadHistoryResponse)(nil),  // 32: agentacp.v1.ReadHistoryResponse
+	(*PromptResourceLink)(nil),   // 14: agentacp.v1.PromptResourceLink
+	(*PromptResource)(nil),       // 15: agentacp.v1.PromptResource
+	(*SendResponse)(nil),         // 16: agentacp.v1.SendResponse
+	(*AnswerRequest)(nil),        // 17: agentacp.v1.AnswerRequest
+	(*AnswerResponse)(nil),       // 18: agentacp.v1.AnswerResponse
+	(*InterruptRequest)(nil),     // 19: agentacp.v1.InterruptRequest
+	(*InterruptResponse)(nil),    // 20: agentacp.v1.InterruptResponse
+	(*ObserveRequest)(nil),       // 21: agentacp.v1.ObserveRequest
+	(*TextUpdate)(nil),           // 22: agentacp.v1.TextUpdate
+	(*ToolActivity)(nil),         // 23: agentacp.v1.ToolActivity
+	(*Choice)(nil),               // 24: agentacp.v1.Choice
+	(*InputRequest)(nil),         // 25: agentacp.v1.InputRequest
+	(*TurnEnded)(nil),            // 26: agentacp.v1.TurnEnded
+	(*HistoryGap)(nil),           // 27: agentacp.v1.HistoryGap
+	(*Extension)(nil),            // 28: agentacp.v1.Extension
+	(*WireProvenance)(nil),       // 29: agentacp.v1.WireProvenance
+	(*Observation)(nil),          // 30: agentacp.v1.Observation
+	(*ListSessionsRequest)(nil),  // 31: agentacp.v1.ListSessionsRequest
+	(*ListSessionsResponse)(nil), // 32: agentacp.v1.ListSessionsResponse
+	(*ReadHistoryRequest)(nil),   // 33: agentacp.v1.ReadHistoryRequest
+	(*ReadHistoryResponse)(nil),  // 34: agentacp.v1.ReadHistoryResponse
 }
 var file_agentacp_v1_session_proto_depIdxs = []int32{
 	3,  // 0: agentacp.v1.Session.ref:type_name -> agentacp.v1.SessionRef
@@ -2397,48 +2610,50 @@ var file_agentacp_v1_session_proto_depIdxs = []int32{
 	12, // 7: agentacp.v1.SendRequest.parts:type_name -> agentacp.v1.PromptPart
 	13, // 8: agentacp.v1.PromptPart.image:type_name -> agentacp.v1.PromptMedia
 	13, // 9: agentacp.v1.PromptPart.audio:type_name -> agentacp.v1.PromptMedia
-	10, // 10: agentacp.v1.SendResponse.receipt:type_name -> agentacp.v1.Receipt
-	3,  // 11: agentacp.v1.AnswerRequest.session:type_name -> agentacp.v1.SessionRef
-	10, // 12: agentacp.v1.AnswerResponse.receipt:type_name -> agentacp.v1.Receipt
-	3,  // 13: agentacp.v1.InterruptRequest.session:type_name -> agentacp.v1.SessionRef
-	10, // 14: agentacp.v1.InterruptResponse.receipt:type_name -> agentacp.v1.Receipt
-	3,  // 15: agentacp.v1.ObserveRequest.session:type_name -> agentacp.v1.SessionRef
-	1,  // 16: agentacp.v1.TextUpdate.speaker:type_name -> agentacp.v1.Speaker
-	22, // 17: agentacp.v1.InputRequest.choices:type_name -> agentacp.v1.Choice
-	2,  // 18: agentacp.v1.WireProvenance.kind:type_name -> agentacp.v1.WireMessageKind
-	3,  // 19: agentacp.v1.Observation.session:type_name -> agentacp.v1.SessionRef
-	20, // 20: agentacp.v1.Observation.text:type_name -> agentacp.v1.TextUpdate
-	21, // 21: agentacp.v1.Observation.tool:type_name -> agentacp.v1.ToolActivity
-	23, // 22: agentacp.v1.Observation.input:type_name -> agentacp.v1.InputRequest
-	24, // 23: agentacp.v1.Observation.turn_ended:type_name -> agentacp.v1.TurnEnded
-	25, // 24: agentacp.v1.Observation.gap:type_name -> agentacp.v1.HistoryGap
-	26, // 25: agentacp.v1.Observation.extension:type_name -> agentacp.v1.Extension
-	26, // 26: agentacp.v1.Observation.source_record:type_name -> agentacp.v1.Extension
-	27, // 27: agentacp.v1.Observation.wire_provenance:type_name -> agentacp.v1.WireProvenance
-	5,  // 28: agentacp.v1.ListSessionsResponse.sessions:type_name -> agentacp.v1.Session
-	3,  // 29: agentacp.v1.ReadHistoryRequest.session:type_name -> agentacp.v1.SessionRef
-	28, // 30: agentacp.v1.ReadHistoryResponse.observations:type_name -> agentacp.v1.Observation
-	6,  // 31: agentacp.v1.Sessions.Open:input_type -> agentacp.v1.OpenRequest
-	8,  // 32: agentacp.v1.Sessions.Resume:input_type -> agentacp.v1.ResumeRequest
-	11, // 33: agentacp.v1.Sessions.Send:input_type -> agentacp.v1.SendRequest
-	19, // 34: agentacp.v1.Sessions.Observe:input_type -> agentacp.v1.ObserveRequest
-	15, // 35: agentacp.v1.Sessions.Answer:input_type -> agentacp.v1.AnswerRequest
-	17, // 36: agentacp.v1.Sessions.Interrupt:input_type -> agentacp.v1.InterruptRequest
-	29, // 37: agentacp.v1.Sessions.ListSessions:input_type -> agentacp.v1.ListSessionsRequest
-	31, // 38: agentacp.v1.Sessions.ReadHistory:input_type -> agentacp.v1.ReadHistoryRequest
-	7,  // 39: agentacp.v1.Sessions.Open:output_type -> agentacp.v1.OpenResponse
-	9,  // 40: agentacp.v1.Sessions.Resume:output_type -> agentacp.v1.ResumeResponse
-	14, // 41: agentacp.v1.Sessions.Send:output_type -> agentacp.v1.SendResponse
-	28, // 42: agentacp.v1.Sessions.Observe:output_type -> agentacp.v1.Observation
-	16, // 43: agentacp.v1.Sessions.Answer:output_type -> agentacp.v1.AnswerResponse
-	18, // 44: agentacp.v1.Sessions.Interrupt:output_type -> agentacp.v1.InterruptResponse
-	30, // 45: agentacp.v1.Sessions.ListSessions:output_type -> agentacp.v1.ListSessionsResponse
-	32, // 46: agentacp.v1.Sessions.ReadHistory:output_type -> agentacp.v1.ReadHistoryResponse
-	39, // [39:47] is the sub-list for method output_type
-	31, // [31:39] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	14, // 10: agentacp.v1.PromptPart.resource_link:type_name -> agentacp.v1.PromptResourceLink
+	15, // 11: agentacp.v1.PromptPart.resource:type_name -> agentacp.v1.PromptResource
+	10, // 12: agentacp.v1.SendResponse.receipt:type_name -> agentacp.v1.Receipt
+	3,  // 13: agentacp.v1.AnswerRequest.session:type_name -> agentacp.v1.SessionRef
+	10, // 14: agentacp.v1.AnswerResponse.receipt:type_name -> agentacp.v1.Receipt
+	3,  // 15: agentacp.v1.InterruptRequest.session:type_name -> agentacp.v1.SessionRef
+	10, // 16: agentacp.v1.InterruptResponse.receipt:type_name -> agentacp.v1.Receipt
+	3,  // 17: agentacp.v1.ObserveRequest.session:type_name -> agentacp.v1.SessionRef
+	1,  // 18: agentacp.v1.TextUpdate.speaker:type_name -> agentacp.v1.Speaker
+	24, // 19: agentacp.v1.InputRequest.choices:type_name -> agentacp.v1.Choice
+	2,  // 20: agentacp.v1.WireProvenance.kind:type_name -> agentacp.v1.WireMessageKind
+	3,  // 21: agentacp.v1.Observation.session:type_name -> agentacp.v1.SessionRef
+	22, // 22: agentacp.v1.Observation.text:type_name -> agentacp.v1.TextUpdate
+	23, // 23: agentacp.v1.Observation.tool:type_name -> agentacp.v1.ToolActivity
+	25, // 24: agentacp.v1.Observation.input:type_name -> agentacp.v1.InputRequest
+	26, // 25: agentacp.v1.Observation.turn_ended:type_name -> agentacp.v1.TurnEnded
+	27, // 26: agentacp.v1.Observation.gap:type_name -> agentacp.v1.HistoryGap
+	28, // 27: agentacp.v1.Observation.extension:type_name -> agentacp.v1.Extension
+	28, // 28: agentacp.v1.Observation.source_record:type_name -> agentacp.v1.Extension
+	29, // 29: agentacp.v1.Observation.wire_provenance:type_name -> agentacp.v1.WireProvenance
+	5,  // 30: agentacp.v1.ListSessionsResponse.sessions:type_name -> agentacp.v1.Session
+	3,  // 31: agentacp.v1.ReadHistoryRequest.session:type_name -> agentacp.v1.SessionRef
+	30, // 32: agentacp.v1.ReadHistoryResponse.observations:type_name -> agentacp.v1.Observation
+	6,  // 33: agentacp.v1.Sessions.Open:input_type -> agentacp.v1.OpenRequest
+	8,  // 34: agentacp.v1.Sessions.Resume:input_type -> agentacp.v1.ResumeRequest
+	11, // 35: agentacp.v1.Sessions.Send:input_type -> agentacp.v1.SendRequest
+	21, // 36: agentacp.v1.Sessions.Observe:input_type -> agentacp.v1.ObserveRequest
+	17, // 37: agentacp.v1.Sessions.Answer:input_type -> agentacp.v1.AnswerRequest
+	19, // 38: agentacp.v1.Sessions.Interrupt:input_type -> agentacp.v1.InterruptRequest
+	31, // 39: agentacp.v1.Sessions.ListSessions:input_type -> agentacp.v1.ListSessionsRequest
+	33, // 40: agentacp.v1.Sessions.ReadHistory:input_type -> agentacp.v1.ReadHistoryRequest
+	7,  // 41: agentacp.v1.Sessions.Open:output_type -> agentacp.v1.OpenResponse
+	9,  // 42: agentacp.v1.Sessions.Resume:output_type -> agentacp.v1.ResumeResponse
+	16, // 43: agentacp.v1.Sessions.Send:output_type -> agentacp.v1.SendResponse
+	30, // 44: agentacp.v1.Sessions.Observe:output_type -> agentacp.v1.Observation
+	18, // 45: agentacp.v1.Sessions.Answer:output_type -> agentacp.v1.AnswerResponse
+	20, // 46: agentacp.v1.Sessions.Interrupt:output_type -> agentacp.v1.InterruptResponse
+	32, // 47: agentacp.v1.Sessions.ListSessions:output_type -> agentacp.v1.ListSessionsResponse
+	34, // 48: agentacp.v1.Sessions.ReadHistory:output_type -> agentacp.v1.ReadHistoryResponse
+	41, // [41:49] is the sub-list for method output_type
+	33, // [33:41] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_agentacp_v1_session_proto_init() }
@@ -2450,13 +2665,19 @@ func file_agentacp_v1_session_proto_init() {
 		(*PromptPart_Text)(nil),
 		(*PromptPart_Image)(nil),
 		(*PromptPart_Audio)(nil),
+		(*PromptPart_ResourceLink)(nil),
+		(*PromptPart_Resource)(nil),
 	}
 	file_agentacp_v1_session_proto_msgTypes[12].OneofWrappers = []any{
+		(*PromptResource_Text)(nil),
+		(*PromptResource_Blob)(nil),
+	}
+	file_agentacp_v1_session_proto_msgTypes[14].OneofWrappers = []any{
 		(*AnswerRequest_Text)(nil),
 		(*AnswerRequest_OptionId)(nil),
 	}
-	file_agentacp_v1_session_proto_msgTypes[24].OneofWrappers = []any{}
-	file_agentacp_v1_session_proto_msgTypes[25].OneofWrappers = []any{
+	file_agentacp_v1_session_proto_msgTypes[26].OneofWrappers = []any{}
+	file_agentacp_v1_session_proto_msgTypes[27].OneofWrappers = []any{
 		(*Observation_Text)(nil),
 		(*Observation_Tool)(nil),
 		(*Observation_Input)(nil),
@@ -2470,7 +2691,7 @@ func file_agentacp_v1_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agentacp_v1_session_proto_rawDesc), len(file_agentacp_v1_session_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   30,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

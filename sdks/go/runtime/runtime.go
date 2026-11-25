@@ -7,20 +7,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	agentacp "agent-acp.local/sdks/go"
 	model "agent-acp.local/sdks/go/model"
 	"google.golang.org/protobuf/proto"
 )
 
-// MCPServer registers a stdio MCP server for each created or resumed session.
+// MCPServer registers an MCP server for each created or resumed session.
 type MCPServer struct {
 	Name, Command string
 	Args          []string
 	Env           map[string]string
+	// CallACP selects the stateless ACP transport when the peer advertises it.
+	// Command, Args and Env describe the stdio fallback on other peers.
+	CallACP func(context.Context, MCPACPRequest) (MCPACPResponse, error)
 }
 
 // ACPUpdate is an original ACP session/update paired with its portable observation.
@@ -50,11 +55,27 @@ type Config struct {
 	WorkingDirectory string
 	Env              map[string]string
 	MCPServers       []MCPServer
+	Elicitation      *Elicitation
 	Stderr           io.Writer
+	// ProtocolVersion opts in to negotiating wire version 2. Zero and one
+	// request stable ACP v1. The adapter can select v1 when offered v2.
+	ProtocolVersion int
+	// ChildSessions advertises v1 child observation and enables explicitly
+	// requested child cancellation. V2 child observations are always routed.
+	ChildSessions bool
+	// NoticeUpdates opts in to v1 live session notices.
+	NoticeUpdates bool
+	// CompactionUpdates opts in to v1 ID-addressed compaction state.
+	CompactionUpdates bool
+	// ModelOnResume enforces an approved model before returning a resumed session.
+	ModelOnResume string
 	// OncePermissionsOnly excludes choices that grant or deny future requests.
 	OncePermissionsOnly bool
 	// SessionMeta supplies optional adapter setup metadata on creation and resume.
 	SessionMeta map[string]any
+	// SystemPromptAppend selects the standard ACP append mode when the peer
+	// advertises it. Provider-specific fallback can remain in SessionMeta.
+	SystemPromptAppend string
 	// ReadHistory reads native retained records without opening a live session.
 	ReadHistory func(context.Context, *model.ReadHistoryRequest) (*model.ReadHistoryResponse, error)
 	// ReplayHistory allows ReadHistory to load an inactive session in a
@@ -64,6 +85,32 @@ type Config struct {
 	// source store. The callback runs in observation order and must return
 	// promptly without invoking the runtime. It owns the update body and ref.
 	OnACPUpdate func(ACPUpdate)
+}
+
+// SessionSetupParams builds the deterministic stdio setup bound by a local
+// broker. Dynamic MCP-over-ACP registrations are dispatched by Runtime.
+func (config Config) SessionSetupParams(cwd string, version int, standardPrompt bool) map[string]any {
+	servers := make([]map[string]any, 0, len(config.MCPServers))
+	for _, server := range config.MCPServers {
+		servers = append(servers, stdioServerParams(server, version))
+	}
+	return config.sessionSetupParams(cwd, servers, standardPrompt)
+}
+
+func (config Config) sessionSetupParams(cwd string, servers []map[string]any, standardPrompt bool) map[string]any {
+	params := map[string]any{"cwd": cwd, "mcpServers": servers}
+	meta := config.SessionMeta
+	if standardPrompt && config.SystemPromptAppend != "" {
+		params["systemPrompt"] = map[string]any{
+			"mode": "append", "content": []map[string]string{{"type": "text", "text": config.SystemPromptAppend}},
+		}
+		meta = maps.Clone(meta)
+		delete(meta, "systemPrompt")
+	}
+	if len(meta) != 0 {
+		params["_meta"] = meta
+	}
+	return params
 }
 
 type Runtime struct {
@@ -81,6 +128,9 @@ var _ agentacp.Runtime = (*Runtime)(nil)
 func New(config Config) (*Runtime, error) {
 	if config.HarnessInstance == "" || (config.Command == "" && config.ReadHistory == nil) {
 		return nil, errors.New("a harness instance and an adapter command or native history reader are required")
+	}
+	if config.ProtocolVersion < 0 || config.ProtocolVersion > 2 {
+		return nil, errors.New("unsupported ACP protocol preference")
 	}
 	if config.WorkingDirectory == "" {
 		var err error
@@ -109,6 +159,12 @@ func New(config Config) (*Runtime, error) {
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	r.cancel()
+	v2Sessions := make(map[*peer]string)
+	for id, session := range r.sessions {
+		if session.p.version == 2 && !session.p.disconnected() {
+			v2Sessions[session.p] = id
+		}
+	}
 	peers := make([]*peer, 0, len(r.peers))
 	for p := range r.peers {
 		peers = append(peers, p)
@@ -117,7 +173,15 @@ func (r *Runtime) Close() error {
 	var wg sync.WaitGroup
 	for _, p := range peers {
 		wg.Add(1)
-		go func() { defer wg.Done(); p.close() }()
+		go func() {
+			defer wg.Done()
+			if id := v2Sessions[p]; id != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				_, _ = rpc[empty](ctx, p, "session/close", map[string]string{"sessionId": id})
+				cancel()
+			}
+			p.close()
+		}()
 	}
 	wg.Wait()
 	return nil
@@ -141,6 +205,15 @@ func (r *Runtime) session(ref *model.SessionRef) (*session, error) {
 		return nil, errors.New("session is not open")
 	}
 	return s, nil
+}
+
+// NegotiatedProtocolVersion reports the immutable wire version of an open session.
+func (r *Runtime) NegotiatedProtocolVersion(ref *model.SessionRef) (int, error) {
+	session, err := r.session(ref)
+	if err != nil {
+		return 0, err
+	}
+	return session.p.version, nil
 }
 
 func (r *Runtime) Unary(ctx context.Context, op string, req, dst proto.Message) error {
@@ -169,6 +242,9 @@ func (r *Runtime) Unary(ctx context.Context, op string, req, dst proto.Message) 
 		if err := r.validate(ref); err != nil {
 			return err
 		}
+		if r.knownChild(ref.SessionId) {
+			return errors.New("reattach a child through its parent session")
+		}
 		s, err := r.attach(ctx, ref.SessionId, "", "")
 		if err == nil {
 			dst.(*model.ResumeResponse).Session = s
@@ -178,6 +254,9 @@ func (r *Runtime) Unary(ctx context.Context, op string, req, dst proto.Message) 
 		q := req.(*model.ReadHistoryRequest)
 		if err := r.validate(q.Session); err != nil {
 			return err
+		}
+		if r.knownChild(q.Session.SessionId) {
+			return errors.New("read a child's history through its parent session")
 		}
 		if r.config.ReadHistory == nil && !r.config.ReplayHistory {
 			return errors.New("native history reader is unavailable for this harness")
@@ -279,7 +358,8 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		}
 	}
 	s := newSession()
-	p, init, err := r.connect(ctx, s.handle, s.selectWire)
+	s.elicitation.cfg = r.config.Elicitation
+	p, init, err := r.connectActive(ctx, s)
 	if err != nil {
 		return nil, err
 	}
@@ -290,14 +370,33 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		}
 	}()
 	caps := r.capabilities(init)
-	params := map[string]any{"cwd": cwd, "mcpServers": r.mcpServers()}
-	if r.config.SessionMeta != nil {
-		params["_meta"] = r.config.SessionMeta
+	v2 := p.version == 2
+	s.wireChildren.Store(v2 || r.config.ChildSessions)
+	if v2 {
+		if init.Capabilities.Session == nil {
+			return nil, errors.New("adapter does not advertise ACP session support")
+		}
+		s.v2 = &v2Session{foreground: "idle"}
 	}
-	if id == "" {
+	servers, err := r.mcpServers(s, p, init)
+	if err != nil {
+		return nil, err
+	}
+	standardPrompt := init.AgentCapabilities.SessionCapabilities.SystemPrompt != nil ||
+		v2 && init.Capabilities.Session.SystemPrompt != nil
+	params := r.config.sessionSetupParams(cwd, servers, standardPrompt)
+	creating := id == ""
+	explicitResume := v2 || init.AgentCapabilities.SessionCapabilities.Resume != nil
+	// Legacy session/load sends historical updates before its response.
+	bufferSetup := creating || explicitResume
+	var configOptions []json.RawMessage
+	if bufferSetup {
+		s.beginSetup()
+	}
+	if creating {
 		resp, err := rpc[struct {
 			SessionID     string
-			ConfigOptions []struct{ ID, Category, Type string }
+			ConfigOptions []json.RawMessage
 		}](ctx, p, "session/new", params)
 		if err != nil {
 			return nil, err
@@ -306,40 +405,58 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		if id == "" {
 			return nil, errors.New("adapter returned an empty session ID")
 		}
-		if modelID != "" {
-			method := "session/set_model"
-			values := map[string]any{"sessionId": id, "modelId": modelID}
-			for _, option := range resp.ConfigOptions {
-				if option.ID != "" && option.Category == "model" && option.Type == "select" {
-					method = "session/set_config_option"
-					values = map[string]any{"sessionId": id, "configId": option.ID, "value": modelID}
-					break
-				}
-			}
-			if _, err := rpc[empty](ctx, p, method, values); err != nil {
-				return nil, fmt.Errorf("select model: %w", err)
-			}
-		}
+		configOptions = resp.ConfigOptions
 	} else {
 		if !caps.CanResume {
 			return nil, errors.New("adapter does not support resuming sessions")
 		}
 		method := "session/load"
-		if init.AgentCapabilities.SessionCapabilities.Resume != nil {
+		if explicitResume {
 			method = "session/resume"
 		}
 		params["sessionId"] = id
-		if _, err := rpc[empty](ctx, p, method, params); err != nil {
+		resp, err := rpc[struct{ ConfigOptions []json.RawMessage }](ctx, p, method, params)
+		if err != nil {
 			return nil, err
 		}
+		configOptions = resp.ConfigOptions
+		modelID = r.config.ModelOnResume
 	}
 	info := &model.Session{Ref: &model.SessionRef{HarnessInstance: r.config.HarnessInstance, SessionId: id}, Capabilities: caps, DisplayName: init.AgentInfo.Name}
+	if v2 {
+		info.DisplayName = init.Info.Name
+	}
 	s.mu.Lock()
 	s.p = p
 	s.cwd = cwd
 	s.info = info
+	if s.wireChildren.Load() {
+		s.children = make(childSessions)
+	}
+	if v2 || r.config.CompactionUpdates {
+		s.compactions = &compactionState{v2: v2}
+	}
 	s.wireSession.Store(&info.Ref.SessionId)
+	s.wireTurn.Store(v2)
 	s.mu.Unlock()
+	if modelID != "" {
+		if err := selectModel(ctx, p, id, modelID, configOptions); err != nil {
+			return nil, fmt.Errorf("select model: %w", err)
+		}
+	}
+	if bufferSetup {
+		if err := s.finishSetup(); err != nil {
+			return nil, err
+		}
+	}
+	if !creating && v2 {
+		s.mu.Lock()
+		stateSeen := s.v2.stateSeen
+		s.mu.Unlock()
+		if !stateSeen {
+			return nil, errors.New("ACP v2 resume omitted current session state")
+		}
+	}
 	r.mu.Lock()
 	current := r.sessions[id]
 	if r.ctx.Err() != nil {
@@ -355,7 +472,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		s.mu.Lock()
 		for opID, op := range current.operations {
 			op.receipt = proto.Clone(op.receipt).(*model.Receipt)
-			if current.turn != nil && current.turn.id == opID {
+			if current.turn != nil && current.turn.id == opID && op.receipt.Status != model.DeliveryStatus_DELIVERY_STATUS_DELIVERED {
 				op.receipt.Status = model.DeliveryStatus_DELIVERY_STATUS_UNKNOWN
 				op.receipt.Detail = "adapter disconnected before confirming delivery"
 			}

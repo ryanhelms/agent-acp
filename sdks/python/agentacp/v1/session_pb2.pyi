@@ -53,7 +53,7 @@ class SessionRef(_message.Message):
     def __init__(self, harness_instance: _Optional[str] = ..., session_id: _Optional[str] = ...) -> None: ...
 
 class Capabilities(_message.Message):
-    __slots__ = ("can_resume", "can_answer", "can_interrupt", "can_list_sessions", "can_read_history", "can_prompt_image", "can_prompt_audio")
+    __slots__ = ("can_resume", "can_answer", "can_interrupt", "can_list_sessions", "can_read_history", "can_prompt_image", "can_prompt_audio", "can_prompt_embedded_context")
     CAN_RESUME_FIELD_NUMBER: _ClassVar[int]
     CAN_ANSWER_FIELD_NUMBER: _ClassVar[int]
     CAN_INTERRUPT_FIELD_NUMBER: _ClassVar[int]
@@ -61,6 +61,7 @@ class Capabilities(_message.Message):
     CAN_READ_HISTORY_FIELD_NUMBER: _ClassVar[int]
     CAN_PROMPT_IMAGE_FIELD_NUMBER: _ClassVar[int]
     CAN_PROMPT_AUDIO_FIELD_NUMBER: _ClassVar[int]
+    CAN_PROMPT_EMBEDDED_CONTEXT_FIELD_NUMBER: _ClassVar[int]
     can_resume: bool
     can_answer: bool
     can_interrupt: bool
@@ -68,7 +69,8 @@ class Capabilities(_message.Message):
     can_read_history: bool
     can_prompt_image: bool
     can_prompt_audio: bool
-    def __init__(self, can_resume: _Optional[bool] = ..., can_answer: _Optional[bool] = ..., can_interrupt: _Optional[bool] = ..., can_list_sessions: _Optional[bool] = ..., can_read_history: _Optional[bool] = ..., can_prompt_image: _Optional[bool] = ..., can_prompt_audio: _Optional[bool] = ...) -> None: ...
+    can_prompt_embedded_context: bool
+    def __init__(self, can_resume: _Optional[bool] = ..., can_answer: _Optional[bool] = ..., can_interrupt: _Optional[bool] = ..., can_list_sessions: _Optional[bool] = ..., can_read_history: _Optional[bool] = ..., can_prompt_image: _Optional[bool] = ..., can_prompt_audio: _Optional[bool] = ..., can_prompt_embedded_context: _Optional[bool] = ...) -> None: ...
 
 class Session(_message.Message):
     __slots__ = ("ref", "capabilities", "display_name")
@@ -131,14 +133,18 @@ class SendRequest(_message.Message):
     def __init__(self, session: _Optional[_Union[SessionRef, _Mapping]] = ..., operation_id: _Optional[str] = ..., text: _Optional[str] = ..., parts: _Optional[_Iterable[_Union[PromptPart, _Mapping]]] = ...) -> None: ...
 
 class PromptPart(_message.Message):
-    __slots__ = ("text", "image", "audio")
+    __slots__ = ("text", "image", "audio", "resource_link", "resource")
     TEXT_FIELD_NUMBER: _ClassVar[int]
     IMAGE_FIELD_NUMBER: _ClassVar[int]
     AUDIO_FIELD_NUMBER: _ClassVar[int]
+    RESOURCE_LINK_FIELD_NUMBER: _ClassVar[int]
+    RESOURCE_FIELD_NUMBER: _ClassVar[int]
     text: str
     image: PromptMedia
     audio: PromptMedia
-    def __init__(self, text: _Optional[str] = ..., image: _Optional[_Union[PromptMedia, _Mapping]] = ..., audio: _Optional[_Union[PromptMedia, _Mapping]] = ...) -> None: ...
+    resource_link: PromptResourceLink
+    resource: PromptResource
+    def __init__(self, text: _Optional[str] = ..., image: _Optional[_Union[PromptMedia, _Mapping]] = ..., audio: _Optional[_Union[PromptMedia, _Mapping]] = ..., resource_link: _Optional[_Union[PromptResourceLink, _Mapping]] = ..., resource: _Optional[_Union[PromptResource, _Mapping]] = ...) -> None: ...
 
 class PromptMedia(_message.Message):
     __slots__ = ("mime_type", "data")
@@ -147,6 +153,28 @@ class PromptMedia(_message.Message):
     mime_type: str
     data: bytes
     def __init__(self, mime_type: _Optional[str] = ..., data: _Optional[bytes] = ...) -> None: ...
+
+class PromptResourceLink(_message.Message):
+    __slots__ = ("uri", "name", "mime_type")
+    URI_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    MIME_TYPE_FIELD_NUMBER: _ClassVar[int]
+    uri: str
+    name: str
+    mime_type: str
+    def __init__(self, uri: _Optional[str] = ..., name: _Optional[str] = ..., mime_type: _Optional[str] = ...) -> None: ...
+
+class PromptResource(_message.Message):
+    __slots__ = ("uri", "mime_type", "text", "blob")
+    URI_FIELD_NUMBER: _ClassVar[int]
+    MIME_TYPE_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    BLOB_FIELD_NUMBER: _ClassVar[int]
+    uri: str
+    mime_type: str
+    text: str
+    blob: bytes
+    def __init__(self, uri: _Optional[str] = ..., mime_type: _Optional[str] = ..., text: _Optional[str] = ..., blob: _Optional[bytes] = ...) -> None: ...
 
 class SendResponse(_message.Message):
     __slots__ = ("receipt",)

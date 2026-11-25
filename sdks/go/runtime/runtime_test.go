@@ -49,6 +49,12 @@ func TestAdapterProcess(t *testing.T) {
 	permission := func(id int) {
 		write(map[string]any{"id": id, "method": "session/request_permission", "params": map[string]any{"sessionId": sessionID, "toolCall": map[string]string{"title": "Allow reading file?", "toolCallId": "tool-7"}, "options": []map[string]string{{"optionId": "once", "name": "Allow once", "kind": "allow_once"}, {"optionId": "deny", "name": "Reject", "kind": "reject_once"}, {"optionId": "always", "kind": "allow_always", "name": "Always allow"}}}})
 	}
+	modelOptions := func(current string) []map[string]any {
+		return []map[string]any{{
+			"id": "model-select", "name": "Model", "category": "model", "type": "select", "currentValue": current,
+			"options": []map[string]string{{"name": "Default", "value": "default"}, {"name": "Model one", "value": "model-one"}},
+		}}
+	}
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 65536), 2<<20)
 	for scanner.Scan() {
@@ -90,7 +96,7 @@ func TestAdapterProcess(t *testing.T) {
 					os.Exit(22)
 				}
 			}
-			respond(row.ID, map[string]any{"sessionId": sessionID, "configOptions": []map[string]string{{"id": "model-select", "category": "model", "type": "select"}}})
+			respond(row.ID, map[string]any{"sessionId": sessionID, "configOptions": modelOptions("default")})
 		case "session/load", "session/resume":
 			var req struct {
 				SessionID  string
@@ -201,7 +207,7 @@ func TestAdapterProcess(t *testing.T) {
 				os.Exit(9)
 			}
 
-			respond(row.ID, map[string]any{})
+			respond(row.ID, map[string]any{"configOptions": modelOptions("model-one")})
 		case "session/list":
 			if table := os.Getenv("TEST_AGENT_ACP_LIST_PAGES"); table != "" {
 				var pages map[string]json.RawMessage

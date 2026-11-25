@@ -41,6 +41,7 @@ type session struct {
 	lostControl     uint64
 	changed         chan struct{}
 	setup           *sessionSetup
+	mcp             acpMCPBindings
 	v2              *v2Session
 }
 
@@ -306,6 +307,8 @@ func (s *session) selectWire(method, sessionID string) bool {
 
 func (s *session) handle(ctx context.Context, method string, raw json.RawMessage) (any, *acp.RequestError) {
 	switch method {
+	case acpMCPMethod:
+		return s.handleMCPACP(ctx, raw)
 	case "session/update":
 		msg, err := decodeUpdateParams(raw)
 		if err != nil {

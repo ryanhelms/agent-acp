@@ -18,11 +18,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// MCPServer registers a stdio MCP server for each created or resumed session.
+// MCPServer registers an MCP server for each created or resumed session.
 type MCPServer struct {
 	Name, Command string
 	Args          []string
 	Env           map[string]string
+	// CallACP selects the stateless ACP transport when the peer advertises it.
+	// Command, Args and Env describe the stdio fallback on other peers.
+	CallACP func(context.Context, MCPACPRequest) (MCPACPResponse, error)
 }
 
 // ACPUpdate is an original ACP session/update paired with its portable observation.
@@ -331,12 +334,13 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		if init.Capabilities.Session == nil {
 			return nil, errors.New("adapter does not advertise ACP session support")
 		}
-		if len(r.config.MCPServers) != 0 && init.Capabilities.Session.MCP.Stdio == nil {
-			return nil, errors.New("adapter does not advertise stdio MCP servers")
-		}
 		s.v2 = &v2Session{foreground: "idle"}
 	}
-	params := map[string]any{"cwd": cwd, "mcpServers": r.mcpServers(p.version)}
+	servers, err := r.mcpServers(s, p, init)
+	if err != nil {
+		return nil, err
+	}
+	params := map[string]any{"cwd": cwd, "mcpServers": servers}
 	meta := r.config.SessionMeta
 	standardPrompt := init.AgentCapabilities.SessionCapabilities.SystemPrompt != nil ||
 		v2 && init.Capabilities.Session.SystemPrompt != nil

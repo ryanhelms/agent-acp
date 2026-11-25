@@ -66,12 +66,13 @@ type handshake struct {
 		LoadSession         bool
 		SessionCapabilities struct{ List, Resume, SystemPrompt *empty }
 		PromptCapabilities  struct{ Image, Audio, EmbeddedContext bool }
+		MCPCapabilities     struct{ ACP bool }
 	}
 	Capabilities struct {
 		Session *struct {
 			Prompt       struct{ Image, Audio, EmbeddedContext *empty }
 			SystemPrompt *empty
-			MCP          struct{ Stdio *empty }
+			MCP          struct{ Stdio, ACP *empty }
 		}
 	}
 }
@@ -242,9 +243,29 @@ func (r *Runtime) capabilities(init handshake) *model.Capabilities {
 	}
 }
 
-func (r *Runtime) mcpServers(version int) []map[string]any {
+func (r *Runtime) mcpServers(s *session, p *peer, init handshake) ([]map[string]any, error) {
+	v2 := p.version == 2
+	hasACP := init.AgentCapabilities.MCPCapabilities.ACP
+	if v2 {
+		hasACP = init.Capabilities.Session.MCP.ACP != nil
+	}
+	s.mcp.mu.Lock()
+	defer s.mcp.mu.Unlock()
 	out := make([]map[string]any, 0, len(r.config.MCPServers))
 	for _, server := range r.config.MCPServers {
+		if server.CallACP != nil && hasACP {
+			if s.mcp.servers == nil {
+				s.mcp.servers = make(map[string]*acpMCPRegistration)
+				s.mcp.conn = p.conn
+			}
+			id := "mcp-" + identifier()
+			s.mcp.servers[id] = &acpMCPRegistration{call: server.CallACP, active: make(map[string]struct{})}
+			out = append(out, map[string]any{"type": "acp", "name": server.Name, "serverId": id})
+			continue
+		}
+		if v2 && init.Capabilities.Session.MCP.Stdio == nil {
+			return nil, errors.New("adapter does not advertise the configured MCP server transport")
+		}
 		names := make([]string, 0, len(server.Env))
 		for n := range server.Env {
 			names = append(names, n)
@@ -255,12 +276,12 @@ func (r *Runtime) mcpServers(version int) []map[string]any {
 			env = append(env, map[string]string{"name": name, "value": server.Env[name]})
 		}
 		entry := map[string]any{"name": server.Name, "command": server.Command, "args": append([]string{}, server.Args...), "env": env}
-		if version == 2 {
+		if v2 {
 			entry["type"] = "stdio"
 		}
 		out = append(out, entry)
 	}
-	return out
+	return out, nil
 }
 
 type pageCursor struct {

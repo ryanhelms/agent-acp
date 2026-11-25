@@ -5,7 +5,8 @@
     "replies": [{
       "observations": [{
         "session": {"harnessInstance": "remote", "sessionId": "same-id"}, "cursor": "previous",
-        "turnId": "history-turn", "input": {"requestId": "historical", "prompt": "An old decision"}
+        "sourceRecord": {"type": "fixture.message", "mediaType": "application/json", "data": "e30="},
+        "wireProvenance": {"kind": "WIRE_MESSAGE_KIND_REQUEST", "protocolVersion": "2.0", "method": "session/request_permission", "idJson": "\"wire/decision\""}, "sourceCursor": "previous", "turnId": "history-turn", "input": {"requestId": "historical", "prompt": "An old decision"}
       }],
       "nextCursor": "opaque/page+2=="
     }]
@@ -13,7 +14,7 @@
   {
     "operation": "Open",
     "request": {"harnessInstance": "local", "workingDirectory": "/tmp/with a space"},
-    "replies": [{"session": {"ref": {"harnessInstance": "local", "sessionId": "same-id"}, "capabilities": {"canAnswer": true, "canInterrupt": true}}}]
+    "replies": [{"session": {"ref": {"harnessInstance": "local", "sessionId": "same-id"}, "capabilities": {"canAnswer": true, "canInterrupt": true, "canPromptImage": true, "canPromptAudio": true}}}]
   },
   {
     "operation": "Send",
@@ -21,12 +22,25 @@
     "replies": [{"receipt": {"operationId": "send-1", "status": "DELIVERY_STATUS_ACCEPTED"}}]
   },
   {
+    "operation": "Send",
+    "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "operationId": "send-media", "parts": [
+      {"text": "  Before\n"},
+      {"image": {"mimeType": "image/png", "data": "AAH/"}},
+      {"text": "\tBetween\n"},
+      {"audio": {"mimeType": "audio/wav", "data": "AgM="}},
+      {"text": "After  "}
+    ]},
+    "replies": [{"receipt": {"operationId": "send-media", "status": "DELIVERY_STATUS_ACCEPTED"}}]
+  },
+  {
     "operation": "Observe",
     "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "afterCursor": "start"},
     "replies": [
-      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c1", "turnId": "t1", "text": {"speaker": "SPEAKER_ASSISTANT", "text": "Ready."}},
+      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c1", "turnId": "t1", "wireProvenance": {"kind": "WIRE_MESSAGE_KIND_NOTIFICATION", "protocolVersion": "2.0", "method": "session/update", "additionalFieldsJson": "{\"_meta\":{\"sequence\":9007199254740993},\"nullable\":null}"}, "sourceCursor": "c1", "sourceRecord": {"type": "acp.session_update_params", "mediaType": "application/json", "data": "eyJzZXNzaW9uSWQiOiJzYW1lLWlkIiwidXBkYXRlIjp7InNlc3Npb25VcGRhdGUiOiJhZ2VudF9tZXNzYWdlX2NodW5rIiwiY29udGVudCI6eyJ0eXBlIjoidGV4dCIsInRleHQiOiJSZWFkeS4ifX0sIl9tZXRhIjp7Im51bGxhYmxlIjpudWxsfSwiZnV0dXJlIjo5MDA3MTk5MjU0NzQwOTkzfQ=="}, "text": {"speaker": "SPEAKER_ASSISTANT", "text": "Ready."}},
       {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c2", "turnId": "t1", "input": {"requestId": "active", "prompt": "Continue?", "choices": [{"id": "once", "label": "Once"}]}},
-      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c3", "turnId": "t1", "extension": {"type": "example/extra", "mediaType": "application/octet-stream", "data": "AAH/"}}
+      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "cursor": "c3", "turnId": "t1", "extension": {"type": "example/extra", "mediaType": "application/octet-stream", "data": "AAH/"}},
+      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "turnId": "t1", "cursor": "c4", "sourceCursor": "c4", "sourceRecord": {"type": "acp.prompt_result", "mediaType": "application/json", "data": "eyJzdG9wUmVhc29uIjoiZW5kX3R1cm4ifQ=="}, "turnEnded": {"reason": "end_turn"}, "wireProvenance": {"kind": "WIRE_MESSAGE_KIND_RESULT", "method": "session/prompt", "protocolVersion": "2.0", "idJson": "9007199254740993"}},
+      {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "turnId": "t1", "cursor": "c5", "sourceCursor": "c5", "sourceRecord": {"type": "acp.prompt_error", "mediaType": "application/json", "data": "eyJjb2RlIjotMzI2MDMsIm1lc3NhZ2UiOiJlcnJvciIsInVua25vd24iOm51bGx9"}, "turnEnded": {"reason": "adapter returned a prompt error"}, "wireProvenance": {"kind": "WIRE_MESSAGE_KIND_ERROR", "method": "session/prompt", "protocolVersion": "2.0", "idJson": "17", "additionalFieldsJson": "{\"_meta\":false}"}}
     ]
   },
   {

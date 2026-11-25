@@ -3,6 +3,7 @@ package agentacp_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"testing"
@@ -21,7 +22,10 @@ type step struct {
 
 func fixture(t *testing.T) []step {
 	t.Helper()
-	data, err := os.ReadFile("../../conformance/session.json")
+	data, err := os.ReadFile("testdata/session.json")
+	if errors.Is(err, os.ErrNotExist) {
+		data, err = os.ReadFile("../../conformance/session.json")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

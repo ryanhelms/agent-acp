@@ -1,6 +1,7 @@
 package nativehistory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,6 +71,10 @@ func codexBatch(ctx context.Context, _ string, id, cursor string) ([]*model.Obse
 			if target == nil {
 				return nil
 			}
+			if raw, ok := target.(*json.RawMessage); ok {
+				*raw = reply.Result
+				return nil
+			}
 			return json.Unmarshal(reply.Result, target)
 		}
 	}
@@ -82,11 +87,13 @@ func codexBatch(ctx context.Context, _ string, id, cursor string) ([]*model.Obse
 	if err := encoder.Encode(map[string]string{"method": "initialized"}); err != nil {
 		return nil, "", err
 	}
-	var metadata struct{ Thread struct{ ID string } }
+	var metadata json.RawMessage
 	if err := call("thread/read", map[string]any{"threadId": id, "includeTurns": false}, &metadata); err != nil {
 		return nil, "", err
 	}
-	if metadata.Thread.ID != id {
+	var returnedID string
+	thread := codexIdentityField(metadata, "thread")
+	if err := json.Unmarshal(codexIdentityField(thread, "id"), &returnedID); err != nil || returnedID != id {
 		return nil, "", errors.New("Codex returned history metadata for a different thread")
 	}
 	params := map[string]any{"threadId": id, "limit": 8, "sortDirection": "asc", "itemsView": "full"}
@@ -94,36 +101,97 @@ func codexBatch(ctx context.Context, _ string, id, cursor string) ([]*model.Obse
 		params["cursor"] = cursor
 	}
 	var page struct {
-		Data []struct {
-			ID, Status, ItemsView string
-			Items                 []json.RawMessage
-		}
+		Data       []json.RawMessage
 		NextCursor string
 	}
 	if err := call("thread/turns/list", params, &page); err != nil {
 		return nil, "", err
 	}
 	var events []*model.Observation
-	for _, turn := range page.Data {
-		if turn.ItemsView != "full" {
-			return nil, "", errors.New("Codex returned incomplete turn items")
+	for _, raw := range page.Data {
+		turn, err := codexTurn(raw)
+		if err != nil {
+			return nil, "", err
 		}
-		start := len(events)
-		for _, raw := range turn.Items {
-			mapped, err := codexItem(raw)
-			if err != nil {
-				return nil, "", err
-			}
-			events = append(events, mapped...)
-		}
-		if turn.Status != "" && turn.Status != "inProgress" {
-			events = append(events, &model.Observation{Event: &model.Observation_TurnEnded{TurnEnded: &model.TurnEnded{Reason: turn.Status}}})
-		}
-		for _, event := range events[start:] {
-			event.TurnId = turn.ID
-		}
+		events = append(events, turn...)
+	}
+	if page.NextCursor == "" {
+		// The thread can change while its turns are being paged. Append its
+		// passive original only after all items, including for an empty thread.
+		record := extension("codex.history.thread", metadata)
+		record.SourceRecord = record.GetExtension()
+		events = append(events, record)
 	}
 	return events, page.NextCursor, nil
+}
+
+// A provider-supplied source is admissible only when its exact, unambiguous
+// JSON identity matches the selected thread. Struct decoding folds key case.
+func codexIdentityField(raw json.RawMessage, name string) json.RawMessage {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	if start, err := d.Token(); err != nil || start != json.Delim('{') {
+		return nil
+	}
+	var found, skipped json.RawMessage
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return nil
+		}
+		if key == name {
+			if found != nil || d.Decode(&found) != nil {
+				return nil
+			}
+		} else if d.Decode(&skipped) != nil {
+			return nil
+		}
+	}
+	return found
+}
+
+func codexTurn(raw json.RawMessage) ([]*model.Observation, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	var header struct{ ID, Status, ItemsView string }
+	var items []json.RawMessage
+	if err := json.Unmarshal(fields["items"], &items); err != nil {
+		return nil, err
+	}
+	delete(fields, "items")
+	metadata, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(metadata, &header); err != nil {
+		return nil, err
+	}
+	if header.ItemsView != "full" {
+		return nil, errors.New("Codex returned incomplete turn items")
+	}
+	var events []*model.Observation
+	for _, item := range items {
+		mapped, err := codexItem(item)
+		if err != nil {
+			return nil, err
+		}
+		if len(mapped) == 0 {
+			mapped = []*model.Observation{extension("codex.history.emptyItem", item)}
+		}
+		events = append(events, withSource("codex.history.item", item, mapped)...)
+	}
+	var end *model.Observation
+	if header.Status == "" || header.Status == "inProgress" {
+		end = extension("codex.history.turn", metadata)
+	} else {
+		end = &model.Observation{Event: &model.Observation_TurnEnded{TurnEnded: &model.TurnEnded{Reason: header.Status}}}
+	}
+	events = append(events, withSource("codex.history.turn", metadata, []*model.Observation{end})...)
+	for _, event := range events {
+		event.TurnId = header.ID
+	}
+	return events, nil
 }
 
 func codexItem(raw json.RawMessage) ([]*model.Observation, error) {

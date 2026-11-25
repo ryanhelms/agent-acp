@@ -38,6 +38,7 @@ type session struct {
 	events      []*model.Observation
 	changed     chan struct{}
 	setup       *sessionSetup
+	v2          *v2Session
 }
 
 type turn struct {
@@ -45,10 +46,12 @@ type turn struct {
 	written          <-chan struct{}
 	done             chan struct{}
 	cancellationSent bool
+	v2               *v2Turn
 }
 type permission struct {
-	options map[string]bool
-	answer  chan string
+	options   map[string]bool
+	answer    chan string
+	cancelled <-chan struct{}
 }
 type operation struct {
 	digest  [32]byte
@@ -100,16 +103,31 @@ func (s *session) send(q *model.SendRequest) (*model.Receipt, error) {
 	if s.turn != nil {
 		return nil, errors.New("session already has an active turn")
 	}
+	if s.v2 != nil && s.v2.foreground != "idle" {
+		return nil, errors.New("ACP v2 session is not confirmed idle")
+	}
+	if s.v2 != nil {
+		if err := validateV2OperationID(q.OperationId); err != nil {
+			return nil, err
+		}
+	}
 	blocks, preview, err := promptBlocks(q, s.info.Capabilities)
 	if err != nil {
 		return nil, err
 	}
 	t := &turn{id: q.OperationId, written: s.p.readyPrompt(), done: make(chan struct{})}
+	if s.v2 != nil {
+		t.v2 = &v2Turn{responseDone: make(chan struct{})}
+	}
 	s.turn = t
 	s.wireTurn.Store(true)
 	s.emit(&model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: model.Speaker_SPEAKER_USER, Text: preview}}})
 	receipt := s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "turn accepted")
-	go s.prompt(t, blocks)
+	if t.v2 != nil {
+		go s.promptV2(t, blocks)
+	} else {
+		go s.prompt(t, blocks)
+	}
 	return receipt, nil
 }
 
@@ -168,10 +186,12 @@ func (s *session) end(reason, sourceType string, raw json.RawMessage, wire *mode
 	} else {
 		s.emit(event)
 	}
-	s.wireTurn.Store(false)
+	s.wireTurn.Store(s.v2 != nil)
 	close(s.turn.done)
 	s.turn = nil
-	clear(s.permissions)
+	if s.v2 == nil {
+		clear(s.permissions)
+	}
 }
 func (s *session) disconnect() {
 	s.mu.Lock()
@@ -181,8 +201,18 @@ func (s *session) disconnect() {
 		// peer exits immediately after writing it. Let the waiter publish the
 		// terminal receipt before closing the observation stream.
 		s.mu.Unlock()
-		<-t.done
+		if t.v2 != nil {
+			<-t.v2.responseDone
+		} else {
+			<-t.done
+		}
 		s.mu.Lock()
+		if s.turn == t {
+			if t.v2.messageID == "" {
+				s.unknown(t.id)
+			}
+			s.end("adapter disconnected", "", nil, nil)
+		}
 	}
 	s.wireSession.Store(nil)
 	s.closed = true
@@ -198,6 +228,11 @@ func (s *session) answer(q *model.AnswerRequest) (*model.Receipt, error) {
 	pending := s.permissions[q.RequestId]
 	if pending == nil {
 		return nil, errors.New("request is not pending in this session")
+	}
+	select {
+	case <-pending.cancelled:
+		return nil, errors.New("provider cancelled the request")
+	default:
 	}
 	selected, ok := q.Answer.(*model.AnswerRequest_OptionId)
 	if !ok || !pending.options[selected.OptionId] {
@@ -247,10 +282,12 @@ func (s *session) interrupt(ctx context.Context, q *model.InterruptRequest) (*mo
 	t.cancellationSent = true
 	// The peer may need these replies before it can finish the original prompt.
 	// Only unanswered permissions are in the map, so each waiter can be settled once.
-	for _, pending := range s.permissions {
-		close(pending.answer)
+	if t.v2 == nil {
+		for _, pending := range s.permissions {
+			close(pending.answer)
+		}
+		clear(s.permissions)
 	}
-	clear(s.permissions)
 	return s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "cancellation sent to adapter"), nil
 }
 
@@ -298,10 +335,14 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 func (s *session) publishUpdate(msg updateParams, raw json.RawMessage, wire *model.WireProvenance) {
 	sourced := msg.extra || wire != nil
 	obs := normalizeUpdate(msg.update)
+	if s.v2 != nil {
+		sourced = true
+		obs = s.normalizeV2(msg.update, obs)
+	}
 	if sourced {
 		// A non-portable variant is itself passive evidence. Keep its
 		// full params once, including null, missing and unknown updates.
-		if obs == nil || obs.GetExtension() != nil {
+		if obs == nil || obs.GetExtension() != nil && obs.GetExtension().GetType() != ACPV2MessageStateSource {
 			obs = nil
 		}
 		obs = s.emitWireSource(obs, ACPUpdateParamsSource, raw, wire)
@@ -333,19 +374,26 @@ func (s *session) publishUpdate(msg updateParams, raw json.RawMessage, wire *mod
 		}
 		capture(source)
 	}
+	if s.v2 != nil {
+		s.updateV2State(msg.update, raw, wire)
+	}
 }
 
 func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (any, *acp.RequestError) {
 	var msg struct {
-		SessionID string
-		ToolCall  struct{ Title, ToolCallID string }
-		Options   []struct{ OptionID, Name, Kind string }
+		SessionID, Title string
+		ToolCall         struct{ Title, ToolCallID string }
+		Subject          struct {
+			Type     string
+			ToolCall json.RawMessage
+		}
+		Options []struct{ OptionID, Name, Kind string }
 	}
 	decodeErr := json.Unmarshal(raw, &msg)
 	receipt := transport.InboundReceipt(ctx, "session/request_permission", msg.SessionID)
 	cancel := map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
 	s.mu.Lock()
-	if receipt == nil || s.info == nil || s.closed || s.info.Ref.SessionId != msg.SessionID || s.turn == nil {
+	if receipt == nil || s.info == nil || s.closed || s.setup != nil || s.info.Ref.SessionId != msg.SessionID || s.turn == nil && s.v2 == nil {
 		s.mu.Unlock()
 		return cancel, nil
 	}
@@ -354,7 +402,7 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 		s.mu.Unlock()
 		return cancel, nil
 	}
-	if s.turn.cancellationSent {
+	if s.v2 == nil && s.turn.cancellationSent {
 		s.emitWireSource(nil, "acp.permission_request", raw, wire)
 		s.mu.Unlock()
 		return cancel, nil
@@ -369,7 +417,16 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 	t := s.turn
 	id := identifier()
 	pending := &permission{options: map[string]bool{}, answer: make(chan string, 1)}
+	if s.v2 != nil {
+		pending.cancelled = ctx.Done()
+	}
 	req := &model.InputRequest{RequestId: id, Prompt: msg.ToolCall.Title}
+	if s.v2 != nil {
+		req.Prompt = msg.Title
+		if msg.Subject.Type == "tool_call" {
+			s.emitV2ToolSubject(msg.Subject.ToolCall)
+		}
+	}
 	if req.Prompt == "" {
 		req.Prompt = fmt.Sprintf("Allow %s?", msg.ToolCall.ToolCallID)
 	}
@@ -396,13 +453,20 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 	s.permissions[id] = pending
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.permissions, id); s.mu.Unlock() }()
+	var turnDone <-chan struct{}
+	if s.v2 == nil {
+		turnDone = t.done
+	}
 	select {
 	case selected, ok := <-pending.answer:
 		if ok {
 			return map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}}, nil
 		}
 	case <-ctx.Done():
-	case <-t.done:
+		if s.v2 != nil {
+			s.dismissV2Permission(id, pending)
+		}
+	case <-turnDone:
 	case <-s.p.runtime.ctx.Done():
 	}
 	return cancel, nil

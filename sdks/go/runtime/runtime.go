@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	agentacp "agent-acp.local/sdks/go"
 	model "agent-acp.local/sdks/go/model"
@@ -51,6 +52,11 @@ type Config struct {
 	Env              map[string]string
 	MCPServers       []MCPServer
 	Stderr           io.Writer
+	// ProtocolVersion opts in to negotiating wire version 2. Zero and one
+	// request stable ACP v1. The adapter can select v1 when offered v2.
+	ProtocolVersion int
+	// ModelOnResume enforces an approved model before returning a resumed session.
+	ModelOnResume string
 	// OncePermissionsOnly excludes choices that grant or deny future requests.
 	OncePermissionsOnly bool
 	// SessionMeta supplies optional adapter setup metadata on creation and resume.
@@ -82,6 +88,9 @@ func New(config Config) (*Runtime, error) {
 	if config.HarnessInstance == "" || (config.Command == "" && config.ReadHistory == nil) {
 		return nil, errors.New("a harness instance and an adapter command or native history reader are required")
 	}
+	if config.ProtocolVersion < 0 || config.ProtocolVersion > 2 {
+		return nil, errors.New("unsupported ACP protocol preference")
+	}
 	if config.WorkingDirectory == "" {
 		var err error
 		config.WorkingDirectory, err = os.Getwd()
@@ -109,6 +118,12 @@ func New(config Config) (*Runtime, error) {
 func (r *Runtime) Close() error {
 	r.mu.Lock()
 	r.cancel()
+	v2Sessions := make(map[*peer]string)
+	for id, session := range r.sessions {
+		if session.p.version == 2 && !session.p.disconnected() {
+			v2Sessions[session.p] = id
+		}
+	}
 	peers := make([]*peer, 0, len(r.peers))
 	for p := range r.peers {
 		peers = append(peers, p)
@@ -117,7 +132,15 @@ func (r *Runtime) Close() error {
 	var wg sync.WaitGroup
 	for _, p := range peers {
 		wg.Add(1)
-		go func() { defer wg.Done(); p.close() }()
+		go func() {
+			defer wg.Done()
+			if id := v2Sessions[p]; id != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				_, _ = rpc[empty](ctx, p, "session/close", map[string]string{"sessionId": id})
+				cancel()
+			}
+			p.close()
+		}()
 	}
 	wg.Wait()
 	return nil
@@ -141,6 +164,15 @@ func (r *Runtime) session(ref *model.SessionRef) (*session, error) {
 		return nil, errors.New("session is not open")
 	}
 	return s, nil
+}
+
+// NegotiatedProtocolVersion reports the immutable wire version of an open session.
+func (r *Runtime) NegotiatedProtocolVersion(ref *model.SessionRef) (int, error) {
+	session, err := r.session(ref)
+	if err != nil {
+		return 0, err
+	}
+	return session.p.version, nil
 }
 
 func (r *Runtime) Unary(ctx context.Context, op string, req, dst proto.Message) error {
@@ -290,14 +322,26 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		}
 	}()
 	caps := r.capabilities(init)
-	params := map[string]any{"cwd": cwd, "mcpServers": r.mcpServers()}
+	v2 := p.version == 2
+	if v2 {
+		if init.Capabilities.Session == nil {
+			return nil, errors.New("adapter does not advertise ACP session support")
+		}
+		if len(r.config.MCPServers) != 0 && init.Capabilities.Session.MCP.Stdio == nil {
+			return nil, errors.New("adapter does not advertise stdio MCP servers")
+		}
+		s.v2 = &v2Session{foreground: "idle"}
+	}
+	params := map[string]any{"cwd": cwd, "mcpServers": r.mcpServers(p.version)}
 	if r.config.SessionMeta != nil {
 		params["_meta"] = r.config.SessionMeta
 	}
 	creating := id == ""
 	var configOptions []json.RawMessage
-	if creating {
+	if creating || v2 {
 		s.beginSetup()
+	}
+	if creating {
 		resp, err := rpc[struct {
 			SessionID     string
 			ConfigOptions []json.RawMessage
@@ -315,29 +359,44 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 			return nil, errors.New("adapter does not support resuming sessions")
 		}
 		method := "session/load"
-		if init.AgentCapabilities.SessionCapabilities.Resume != nil {
+		if v2 || init.AgentCapabilities.SessionCapabilities.Resume != nil {
 			method = "session/resume"
 		}
 		params["sessionId"] = id
-		if _, err := rpc[empty](ctx, p, method, params); err != nil {
+		resp, err := rpc[struct{ ConfigOptions []json.RawMessage }](ctx, p, method, params)
+		if err != nil {
 			return nil, err
 		}
+		configOptions = resp.ConfigOptions
+		modelID = r.config.ModelOnResume
 	}
 	info := &model.Session{Ref: &model.SessionRef{HarnessInstance: r.config.HarnessInstance, SessionId: id}, Capabilities: caps, DisplayName: init.AgentInfo.Name}
+	if v2 {
+		info.DisplayName = init.Info.Name
+	}
 	s.mu.Lock()
 	s.p = p
 	s.cwd = cwd
 	s.info = info
 	s.wireSession.Store(&info.Ref.SessionId)
+	s.wireTurn.Store(v2)
 	s.mu.Unlock()
-	if creating {
-		if modelID != "" {
-			if err := selectModel(ctx, p, id, modelID, configOptions); err != nil {
-				return nil, fmt.Errorf("select model: %w", err)
-			}
+	if modelID != "" {
+		if err := selectModel(ctx, p, id, modelID, configOptions); err != nil {
+			return nil, fmt.Errorf("select model: %w", err)
 		}
+	}
+	if creating || v2 {
 		if err := s.finishSetup(); err != nil {
 			return nil, err
+		}
+	}
+	if !creating && v2 {
+		s.mu.Lock()
+		stateSeen := s.v2.stateSeen
+		s.mu.Unlock()
+		if !stateSeen {
+			return nil, errors.New("ACP v2 resume omitted current session state")
 		}
 	}
 	r.mu.Lock()
@@ -355,7 +414,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		s.mu.Lock()
 		for opID, op := range current.operations {
 			op.receipt = proto.Clone(op.receipt).(*model.Receipt)
-			if current.turn != nil && current.turn.id == opID {
+			if current.turn != nil && current.turn.id == opID && op.receipt.Status != model.DeliveryStatus_DELIVERY_STATUS_DELIVERED {
 				op.receipt.Status = model.DeliveryStatus_DELIVERY_STATUS_UNKNOWN
 				op.receipt.Detail = "adapter disconnected before confirming delivery"
 			}

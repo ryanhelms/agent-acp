@@ -65,6 +65,9 @@ func selectModel(ctx context.Context, p *peer, sessionID, modelID string, initia
 		return err
 	}
 	if option == nil {
+		if p.version == 2 {
+			return fmt.Errorf("adapter did not advertise a configuration option for model %q", modelID)
+		}
 		_, err = rpc[empty](ctx, p, "session/set_model", map[string]string{"sessionId": sessionID, "modelId": modelID})
 		return err
 	}
@@ -75,9 +78,11 @@ func selectModel(ctx context.Context, p *peer, sessionID, modelID string, initia
 	if option.CurrentValue == wanted {
 		return nil
 	}
-	response, err := rpc[struct{ ConfigOptions []json.RawMessage }](ctx, p, "session/set_config_option", map[string]string{
-		"sessionId": sessionID, "configId": string(option.Id), "value": modelID,
-	})
+	params := map[string]string{"sessionId": sessionID, "configId": string(option.Id), "value": modelID}
+	if p.version == 2 {
+		params["type"] = "id"
+	}
+	response, err := rpc[struct{ ConfigOptions []json.RawMessage }](ctx, p, "session/set_config_option", params)
 	if err != nil {
 		return err
 	}

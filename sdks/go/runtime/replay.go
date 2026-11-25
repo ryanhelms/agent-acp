@@ -59,6 +59,9 @@ type replayPage struct {
 	response   model.ReadHistoryResponse
 	next       string
 	err        error
+	v2         bool
+	replayDone bool
+	stateSeen  bool
 }
 
 // ReplaySnapshot is a bounded, immutable view of one successful passive load.
@@ -212,15 +215,22 @@ func (r *Runtime) loadReplay(ctx context.Context, page *replayPage) error {
 		return err
 	}
 	defer peer.close()
-	if !init.AgentCapabilities.LoadSession {
+	method := "session/load"
+	params := map[string]any{"sessionId": id, "cwd": r.config.WorkingDirectory, "mcpServers": []empty{}}
+	if peer.version == 2 {
+		if init.Capabilities.Session == nil {
+			return errors.New("adapter does not advertise ACP session support")
+		}
+		method = "session/resume"
+		params["replayFrom"] = map[string]string{"type": "start"}
+	} else if !init.AgentCapabilities.LoadSession {
 		return errors.New("adapter does not advertise ACP session loading")
 	}
 	page.mu.Lock()
+	page.v2 = peer.version == 2
 	page.collecting = true
 	page.mu.Unlock()
-	if _, err := rpc[empty](ctx, peer, "session/load", map[string]any{
-		"sessionId": id, "cwd": r.config.WorkingDirectory, "mcpServers": []empty{},
-	}); err != nil {
+	if _, err := rpc[empty](ctx, peer, method, params); err != nil {
 		return err
 	}
 	page.mu.Lock()
@@ -228,6 +238,9 @@ func (r *Runtime) loadReplay(ctx context.Context, page *replayPage) error {
 	page.collecting = false
 	if page.err != nil {
 		return page.err
+	}
+	if page.v2 && (!page.replayDone || !page.stateSeen) {
+		return errors.New("ACP v2 replay omitted its replay marker or current session state")
 	}
 	if !page.matched {
 		return errors.New("ACP replay changed since the previous page")
@@ -253,7 +266,10 @@ func (page *replayPage) handle(ctx context.Context, method string, raw json.RawM
 		}
 		page.mu.Lock()
 		defer page.mu.Unlock()
-		if !page.collecting || message.id == "" || message.id != page.session.SessionId || page.next != "" || page.err != nil {
+		if !page.collecting || message.id == "" || message.id != page.session.SessionId || page.err != nil {
+			return nil, nil
+		}
+		if page.v2 && page.v2ReplayBoundary(message.update) || page.next != "" {
 			return nil, nil
 		}
 		var records []*model.Observation
@@ -272,6 +288,31 @@ func (page *replayPage) handle(ctx context.Context, method string, raw json.RawM
 		return nil, nil
 	default:
 		return nil, acp.NewMethodNotFound(method)
+	}
+}
+
+func (page *replayPage) v2ReplayBoundary(raw json.RawMessage) bool {
+	var update struct{ SessionUpdate, State string }
+	if json.Unmarshal(raw, &update) != nil {
+		return false
+	}
+	switch update.SessionUpdate {
+	case "replay_complete":
+		if page.replayDone {
+			page.err = errors.New("ACP v2 replay sent duplicate completion markers")
+		}
+		page.replayDone = true
+		return true
+	case "state_update":
+		if page.replayDone {
+			switch update.State {
+			case "idle", "running", "requires_action", "unknown":
+				page.stateSeen = true
+			}
+		}
+		return true
+	default:
+		return page.replayDone
 	}
 }
 

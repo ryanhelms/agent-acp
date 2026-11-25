@@ -386,8 +386,11 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		v2 && init.Capabilities.Session.SystemPrompt != nil
 	params := r.config.sessionSetupParams(cwd, servers, standardPrompt)
 	creating := id == ""
+	explicitResume := v2 || init.AgentCapabilities.SessionCapabilities.Resume != nil
+	// Legacy session/load sends historical updates before its response.
+	bufferSetup := creating || explicitResume
 	var configOptions []json.RawMessage
-	if creating || v2 {
+	if bufferSetup {
 		s.beginSetup()
 	}
 	if creating {
@@ -408,7 +411,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 			return nil, errors.New("adapter does not support resuming sessions")
 		}
 		method := "session/load"
-		if v2 || init.AgentCapabilities.SessionCapabilities.Resume != nil {
+		if explicitResume {
 			method = "session/resume"
 		}
 		params["sessionId"] = id
@@ -441,7 +444,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 			return nil, fmt.Errorf("select model: %w", err)
 		}
 	}
-	if creating || v2 {
+	if bufferSetup {
 		if err := s.finishSetup(); err != nil {
 			return nil, err
 		}

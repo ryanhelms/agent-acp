@@ -42,6 +42,7 @@ type session struct {
 	changed         chan struct{}
 	setup           *sessionSetup
 	mcp             acpMCPBindings
+	elicitation     elicitationState
 	v2              *v2Session
 }
 
@@ -309,6 +310,10 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 	switch method {
 	case acpMCPMethod:
 		return s.handleMCPACP(ctx, raw)
+	case "elicitation/create":
+		return s.createElicitation(ctx, raw)
+	case "elicitation/complete":
+		return s.completeElicitation(ctx, raw)
 	case "session/update":
 		msg, err := decodeUpdateParams(raw)
 		if err != nil {

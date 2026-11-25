@@ -29,7 +29,7 @@ func TestLifecyclePeer(t *testing.T) {
 	commands := func(session, name string) {
 		write(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": session, "update": map[string]any{
 			"sessionUpdate": "available_commands_update", "availableCommands": []map[string]string{{"name": name, "description": "fixture"}},
-		}}})
+		}, "_meta": map[string]string{"marker": name}}, "fixture": name})
 	}
 	config := func(current string) map[string]any {
 		values := []map[string]string{{"name": "Default", "value": "default"}, {"name": "Opus", "value": "opus"}}
@@ -45,7 +45,7 @@ func TestLifecyclePeer(t *testing.T) {
 			"options": []map[string]string{{"name": "Allow", "kind": "allow_once", "optionId": "allow"}},
 		}})
 	}
-	var promptID json.RawMessage
+	var promptID, reattachID json.RawMessage
 	cancelled, switched := false, false
 	replies := map[string]bool{}
 	input := bufio.NewScanner(os.Stdin)
@@ -61,7 +61,15 @@ func TestLifecyclePeer(t *testing.T) {
 		}
 		switch req.Method {
 		case "initialize":
-			respond(req.ID, map[string]int{"protocolVersion": 1})
+			response := map[string]any{"protocolVersion": 1}
+			if scenario == "resume-setup" || scenario == "load-setup" {
+				caps := map[string]any{"loadSession": true}
+				if scenario == "resume-setup" {
+					caps["sessionCapabilities"] = map[string]any{"resume": map[string]any{}}
+				}
+				response["agentCapabilities"] = caps
+			}
+			respond(req.ID, response)
 		case "session/new":
 			response := map[string]any{"sessionId": "session"}
 			if scenario != "cancel" && scenario != "legacy" {
@@ -76,8 +84,22 @@ func TestLifecyclePeer(t *testing.T) {
 				commands("other-session", "crossed")
 				commands("session", "after_new")
 			}
+		case "session/resume", "session/load":
+			if req.Params["sessionId"] != "session" || req.Method == "session/resume" && scenario != "resume-setup" ||
+				req.Method == "session/load" && scenario != "load-setup" {
+				os.Exit(9)
+			}
+			if scenario == "resume-setup" {
+				commands("other-session", "crossed")
+				commands("session", "before_resume_result")
+			} else {
+				commands("session", "historical")
+			}
+			reattachID = req.ID
+			permission(91)
 		case "session/set_config_option":
-			if scenario != "change-model" && scenario != "incorrect-ack" || req.Params["sessionId"] != "session" ||
+			if scenario != "change-model" && scenario != "incorrect-ack" && scenario != "resume-setup" && scenario != "load-setup" ||
+				req.Params["sessionId"] != "session" ||
 				req.Params["configId"] != "preferred-model" || req.Params["value"] != "opus" {
 				os.Exit(3)
 			}
@@ -114,6 +136,17 @@ func TestLifecyclePeer(t *testing.T) {
 			permission(93)
 		case "":
 			id := string(req.ID)
+			if reattachID != nil {
+				if id != "91" || req.Result.Outcome.Outcome != "cancelled" {
+					os.Exit(10)
+				}
+				respond(reattachID, map[string]any{"configOptions": []any{config("default")}})
+				reattachID = nil
+				if scenario == "resume-setup" {
+					commands("session", "after_resume_result")
+				}
+				continue
+			}
 			if !cancelled || (id != "91" && id != "92" && id != "93") || replies[id] || req.Result.Outcome.Outcome != "cancelled" {
 				os.Exit(7)
 			}
@@ -128,12 +161,12 @@ func TestLifecyclePeer(t *testing.T) {
 	os.Exit(0)
 }
 
-func lifecycleClient(t *testing.T, scenario string, capture func(ACPUpdate)) (*agentacp.Sessions, context.Context) {
+func lifecycleClient(t *testing.T, scenario, modelOnResume string, capture func(ACPUpdate)) (*agentacp.Sessions, context.Context) {
 	t.Helper()
 	runtime, err := New(Config{
 		HarnessInstance: "lifecycle", WorkingDirectory: t.TempDir(),
 		Command: os.Args[0], Args: []string{"-test.run=^TestLifecyclePeer$"}, Env: map[string]string{"ACP_LIFECYCLE_PEER": scenario},
-		OnACPUpdate: capture,
+		OnACPUpdate: capture, ModelOnResume: modelOnResume,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +178,7 @@ func lifecycleClient(t *testing.T, scenario string, capture func(ACPUpdate)) (*a
 }
 
 func TestInterruptCancelsPendingPermissionsBeforePromptCompletes(t *testing.T) {
-	client, ctx := lifecycleClient(t, "cancel", nil)
+	client, ctx := lifecycleClient(t, "cancel", "", nil)
 	opened, err := client.Open(ctx, &model.OpenRequest{HarnessInstance: "lifecycle"})
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +247,7 @@ func TestSetupPreservesAnnouncementsAndConfirmsModel(t *testing.T) {
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			commands := make(chan ACPUpdate, 4)
-			client, ctx := lifecycleClient(t, scenario.name, func(update ACPUpdate) { commands <- update })
+			client, ctx := lifecycleClient(t, scenario.name, "", func(update ACPUpdate) { commands <- update })
 			opened, err := client.Open(ctx, &model.OpenRequest{HarnessInstance: "lifecycle", Model: "opus"})
 			if scenario.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), scenario.wantErr) || opened != nil {
@@ -256,6 +289,41 @@ func TestSetupPreservesAnnouncementsAndConfirmsModel(t *testing.T) {
 				}
 			}
 			t.Fatal("missing prompt result")
+		})
+	}
+}
+
+func TestV1ResumePreservesSetupUpdatesAndLoadStaysPassive(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want []string
+	}{
+		{"resume-setup", []string{"before_resume_result", "after_resume_result", "during_config"}},
+		{"load-setup", []string{"during_config"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			updates := make(chan ACPUpdate, 8)
+			client, ctx := lifecycleClient(t, tc.name, "opus", func(update ACPUpdate) { updates <- update })
+			ref := &model.SessionRef{HarnessInstance: "lifecycle", SessionId: "session"}
+			if _, err := client.Resume(ctx, &model.ResumeRequest{Session: ref}); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range tc.want {
+				select {
+				case update := <-updates:
+					if update.Session.GetSessionId() != ref.SessionId || update.TurnID != "" || update.WireProvenance == nil ||
+						!strings.Contains(string(update.Body), name) || !strings.Contains(string(update.Params), `"marker":"`+name+`"`) {
+						t.Fatalf("expected scoped passive %q update, got %s", name, update.Params)
+					}
+				default:
+					t.Fatalf("missing setup update %q", name)
+				}
+			}
+			select {
+			case update := <-updates:
+				t.Fatalf("unexpected setup update: %s", update.Params)
+			default:
+			}
 		})
 	}
 }

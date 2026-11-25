@@ -46,3 +46,12 @@ func TestPromptResourceBlocks(t *testing.T) {
 		t.Fatalf("baseline link support: %v, %v", blocks, err)
 	}
 }
+
+func TestV2ModelRequiresAuthoritativeConfigID(t *testing.T) {
+	legacy := json.RawMessage(`{"id":"model","category":"model","type":"select","currentValue":"fable","options":[{"value":"fable"}]}`)
+	preview := json.RawMessage(`{"configId":"model","category":"model","type":"select","currentValue":"opus","options":[{"groupId":"group","options":[{"value":"opus"}]}]}`)
+	choice, err := modelOption([]json.RawMessage{legacy, preview}, "", 2)
+	if err != nil || choice == nil || choice.ID != "model" || choice.CurrentValue != "opus" || !choice.offers("opus") {
+		t.Fatalf("preview identifier and grouped option: %+v, %v", choice, err)
+	}
+}

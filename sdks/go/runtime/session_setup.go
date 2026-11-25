@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	model "agent-acp.local/sdks/go/model"
-	acp "github.com/coder/acp-go-sdk"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -60,7 +59,7 @@ func (s *session) finishSetup() error {
 }
 
 func selectModel(ctx context.Context, p *peer, sessionID, modelID string, initial []json.RawMessage) error {
-	option, err := modelOption(initial, "")
+	option, err := modelOption(initial, "", p.version)
 	if err != nil {
 		return err
 	}
@@ -71,14 +70,14 @@ func selectModel(ctx context.Context, p *peer, sessionID, modelID string, initia
 		_, err = rpc[empty](ctx, p, "session/set_model", map[string]string{"sessionId": sessionID, "modelId": modelID})
 		return err
 	}
-	wanted := acp.SessionConfigValueId(modelID)
-	if !offersModel(option.Options, wanted) {
-		return fmt.Errorf("model %q was not offered by configuration option %q", modelID, option.Id)
+	wanted := modelID
+	if !option.offers(wanted) {
+		return fmt.Errorf("model %q was not offered by configuration option %q", modelID, option.ID)
 	}
 	if option.CurrentValue == wanted {
 		return nil
 	}
-	params := map[string]string{"sessionId": sessionID, "configId": string(option.Id), "value": modelID}
+	params := map[string]string{"sessionId": sessionID, "configId": string(option.ID), "value": modelID}
 	if p.version == 2 {
 		params["type"] = "id"
 	}
@@ -86,52 +85,56 @@ func selectModel(ctx context.Context, p *peer, sessionID, modelID string, initia
 	if err != nil {
 		return err
 	}
-	current, err := modelOption(response.ConfigOptions, option.Id)
+	current, err := modelOption(response.ConfigOptions, option.ID, p.version)
 	if err != nil {
 		return err
 	}
-	if current == nil || current.CurrentValue != wanted || !offersModel(current.Options, wanted) {
-		return fmt.Errorf("adapter did not confirm model %q in configuration option %q", modelID, option.Id)
+	if current == nil || current.CurrentValue != wanted || !current.offers(wanted) {
+		return fmt.Errorf("adapter did not confirm model %q in configuration option %q", modelID, option.ID)
 	}
 	return nil
 }
 
-func modelOption(options []json.RawMessage, selectedID acp.SessionConfigId) (*acp.SessionConfigOptionSelect, error) {
+type modelConfigOption struct {
+	ID           string
+	CurrentValue string
+	Options      []struct {
+		Value   string
+		Options []struct{ Value string }
+	}
+}
+
+func modelOption(options []json.RawMessage, selectedID string, version int) (*modelConfigOption, error) {
 	for _, raw := range options {
-		var header struct {
-			ID       acp.SessionConfigId
-			Category acp.SessionConfigOptionCategory
-			Type     string
-		}
-		if json.Unmarshal(raw, &header) != nil || header.ID == "" || header.Type != "select" {
+		var header struct{ ID, ConfigID, Category, Type string }
+		if json.Unmarshal(raw, &header) != nil || header.Type != "select" {
 			continue
 		}
-		if selectedID == "" && header.Category != acp.SessionConfigOptionCategoryModel || selectedID != "" && selectedID != header.ID {
+		id := header.ID
+		if version == 2 {
+			id = header.ConfigID
+		}
+		if id == "" || selectedID == "" && header.Category != "model" || selectedID != "" && selectedID != id {
 			continue
 		}
-		var option acp.SessionConfigOptionSelect
+		var option modelConfigOption
 		if err := json.Unmarshal(raw, &option); err != nil {
-			return nil, fmt.Errorf("invalid model configuration option %q: %w", header.ID, err)
+			return nil, fmt.Errorf("invalid model configuration option %q: %w", id, err)
 		}
+		option.ID = id
 		return &option, nil
 	}
 	return nil, nil
 }
 
-func offersModel(options acp.SessionConfigSelectOptions, wanted acp.SessionConfigValueId) bool {
-	if options.Ungrouped != nil {
-		for _, option := range *options.Ungrouped {
-			if option.Value == wanted {
-				return true
-			}
+func (option modelConfigOption) offers(wanted string) bool {
+	for _, choice := range option.Options {
+		if choice.Value == wanted {
+			return true
 		}
-	}
-	if options.Grouped != nil {
-		for _, group := range *options.Grouped {
-			for _, option := range group.Options {
-				if option.Value == wanted {
-					return true
-				}
+		for _, grouped := range choice.Options {
+			if grouped.Value == wanted {
+				return true
 			}
 		}
 	}

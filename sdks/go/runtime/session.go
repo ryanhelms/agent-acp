@@ -89,8 +89,9 @@ func (s *session) existing(id string, req proto.Message) (*model.Receipt, error)
 	return nil, nil
 }
 func fingerprint(req proto.Message) [32]byte {
-	b, _ := proto.MarshalOptions{Deterministic: true}.Marshal(req)
-	return sha256.Sum256(append([]byte(string(req.ProtoReflect().Descriptor().FullName())+"\x00"), b...))
+	prefix := []byte(string(req.ProtoReflect().Descriptor().FullName()) + "\x00")
+	encoded, _ := proto.MarshalOptions{Deterministic: true}.MarshalAppend(prefix, req)
+	return sha256.Sum256(encoded)
 }
 func (s *session) record(id string, req proto.Message, status model.DeliveryStatus, detail string) *model.Receipt {
 	receipt := &model.Receipt{OperationId: id, Status: status, Detail: detail}

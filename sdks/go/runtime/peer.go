@@ -37,18 +37,16 @@ type peer struct {
 	nextPrompt chan struct{}
 }
 
-func (p *peer) Write(data []byte) (int, error) {
-	n, err := p.in.Write(data)
-	p.writeMu.Lock()
-	if p.nextPrompt != nil {
-		var header struct{ Method string }
-		if json.Unmarshal(data, &header) == nil && header.Method == "session/prompt" {
-			close(p.nextPrompt)
-			p.nextPrompt = nil
-		}
+func (p *peer) requestWritten(method string) {
+	if method != "session/prompt" {
+		return
 	}
-	p.writeMu.Unlock()
-	return n, err
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	if p.nextPrompt != nil {
+		close(p.nextPrompt)
+		p.nextPrompt = nil
+	}
 }
 
 func (p *peer) readyPrompt() <-chan struct{} {
@@ -148,7 +146,8 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 		opts.SelectInbound = selectInbound
 		opts.OmitPlainNotifications = true
 	}
-	p.conn = transport.NewConnectionWithOptions(handle, p, out, opts)
+	opts.AfterRequestWrite = p.requestWritten
+	p.conn = transport.NewConnectionWithOptions(handle, in, out, opts)
 	if err = cmd.Start(); err != nil {
 		r.mu.Unlock()
 		in.Close()

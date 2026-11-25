@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,14 +25,101 @@ func (s *session) cursor(seq uint64) string { return s.epoch + "." + strconv.For
 // emit is called with the session lock held. The bounded window is disposable
 // transport state; durable reads go to the harness's native history reader.
 func (s *session) emit(event *model.Observation) {
-	s.sequence++
-	event.Cursor = s.cursor(s.sequence)
+	s.position(event)
+	s.retain(event, proto.Size(event))
+}
+
+func (s *session) position(event *model.Observation) {
+	event.Cursor = s.cursor(s.sequence + 1)
 	event.Session = s.info.Ref
 	if s.turn != nil {
 		event.TurnId = s.turn.id
 	}
+}
+
+// emitSource keeps the original record once, at the correlated observation.
+// A passive source with no semantic event is itself an extension observation.
+func (s *session) emitSource(event *model.Observation, kind string, raw json.RawMessage) *model.Observation {
+	return s.emitWireSource(event, kind, raw, nil)
+}
+
+func (s *session) emitWireSource(event *model.Observation, kind string, raw json.RawMessage, wire *model.WireProvenance) *model.Observation {
+	event, source := withSource(event, kind, raw)
+	event.WireProvenance = wire
+	s.position(event)
+	event.SourceCursor = proto.String(event.Cursor)
+	size := boundEvidence(event, source, "live_window_limit", liveWindowBytes)
+	s.retain(event, size)
+	return event
+}
+
+// Prefer the original source when it fits by itself. If the source cannot
+// fit, retain small envelope fields alongside its explicit omission marker.
+func boundEvidence(event *model.Observation, source *model.Extension, reason string, limit int) int {
+	size := proto.Size(event)
+	if size <= limit {
+		return size
+	}
+	wire := event.WireProvenance
+	event.WireProvenance = nil
+	if wire == nil || proto.Size(event) > limit {
+		omitSource(event, source, reason, limit)
+	}
+	event.WireProvenance = wire
+	if wire != nil && proto.Size(event) > limit {
+		omitWireExtras(wire)
+		if proto.Size(event) > limit {
+			omitWireID(wire)
+		}
+		if proto.Size(event) > limit {
+			if source.Type == "acp.source_omitted" {
+				compactOversizedPreview(event, source, limit)
+			} else {
+				omitSource(event, source, reason, limit)
+			}
+		}
+	}
+	return proto.Size(event)
+}
+
+func omitSource(event *model.Observation, source *model.Extension, reason string, limit int) {
+	marker, _ := json.Marshal(struct {
+		SourceType string `json:"sourceType"`
+		Reason     string `json:"reason"`
+		ByteCount  int    `json:"byteCount"`
+	}{source.Type, reason, len(source.Data)})
+	source.Type, source.Data = "acp.source_omitted", marker
+	compactOversizedPreview(event, source, limit)
+}
+
+func compactOversizedPreview(event *model.Observation, source *model.Extension, limit int) {
+	if proto.Size(event) <= limit {
+		return
+	}
+	if end := event.GetTurnEnded(); end != nil {
+		end.Reason = "adapter returned an oversized terminal reason"
+		return
+	}
+	// The typed preview can itself exceed the budget. Keep the passive
+	// evidence or omission marker visible at this cursor, without evicting it.
+	event.SourceRecord = nil
+	event.Event = &model.Observation_Extension{Extension: source}
+}
+
+func withSource(event *model.Observation, kind string, raw json.RawMessage) (*model.Observation, *model.Extension) {
+	source := &model.Extension{Type: kind, MediaType: "application/json", Data: raw}
+	if event == nil {
+		event = &model.Observation{Event: &model.Observation_Extension{Extension: source}}
+	} else {
+		event.SourceRecord = source
+	}
+	return event, source
+}
+
+func (s *session) retain(event *model.Observation, size int) {
+	s.sequence++
 	s.events = append(s.events, event)
-	s.windowBytes += proto.Size(event)
+	s.windowBytes += size
 	for len(s.events) > liveWindow || s.windowBytes > liveWindowBytes {
 		s.windowBytes -= proto.Size(s.events[0])
 		s.events[0] = nil

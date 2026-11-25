@@ -43,7 +43,7 @@ type v2Turn struct {
 	terminal     *v2State
 }
 
-func (s *session) promptV2(t *turn, blocks []map[string]string) {
+func (s *session) promptV2(t *turn, blocks []any) {
 	defer close(t.v2.responseDone)
 	_, receipt, err := transport.SendRequestWithReceipt[receiptResult](s.p.conn, s.p.runtime.ctx, "session/prompt", map[string]any{
 		"sessionId": s.info.Ref.SessionId, "idempotencyKey": t.id, "prompt": blocks,

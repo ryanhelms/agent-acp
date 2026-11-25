@@ -30,6 +30,9 @@ message Capabilities {
   bool can_interrupt = 3;
   bool can_list_sessions = 4;
   bool can_read_history = 5;
+  bool can_prompt_image = 6;
+  bool can_prompt_audio = 7;
+  bool can_prompt_embedded_context = 8;
 }
 
 message Session {
@@ -73,6 +76,34 @@ message SendRequest {
   string operation_id = 2;
   // Preserve whitespace and shell punctuation exactly.
   string text = 3;
+  // An ordered prompt. Use this or text, never both.
+  repeated PromptPart parts = 4;
+}
+message PromptPart {
+  oneof content {
+    string text = 1;
+    PromptMedia image = 2;
+    PromptMedia audio = 3;
+    PromptResourceLink resource_link = 4;
+    PromptResource resource = 5;
+  }
+}
+message PromptMedia {
+  string mime_type = 1;
+  bytes data = 2;
+}
+message PromptResourceLink {
+  string uri = 1;
+  string name = 2;
+  string mime_type = 3;
+}
+message PromptResource {
+  string uri = 1;
+  string mime_type = 2;
+  oneof body {
+    string text = 3;
+    bytes blob = 4;
+  }
 }
 message SendResponse {
   Receipt receipt = 1;
@@ -138,6 +169,36 @@ message Extension {
   string media_type = 2;
   bytes data = 3;
 }
+enum WireMessageKind {
+  WIRE_MESSAGE_KIND_UNSPECIFIED = 0;
+  WIRE_MESSAGE_KIND_REQUEST = 1;
+  WIRE_MESSAGE_KIND_NOTIFICATION = 2;
+  WIRE_MESSAGE_KIND_RESULT = 3;
+  WIRE_MESSAGE_KIND_ERROR = 4;
+}
+
+// Metadata of one observed, correlated JSON-RPC frame. The original params,
+// result or error is carried separately by the observation at source_cursor.
+message WireProvenance {
+  WireMessageKind kind = 1;
+  optional string protocol_version = 2;
+  // For replies, the method of the request this peer answered.
+  string method = 3;
+  // The original JSON token, including quotes on string IDs. Missing and
+  // literal JSON null are distinct. Large numbers are never rounded.
+  optional string id_json = 4;
+  // JSON object containing only additional envelope members, in wire order.
+  string additional_fields_json = 5;
+  uint64 omitted_additional_fields_bytes = 6;
+  uint64 omitted_id_bytes = 7;
+  // Used instead of the corresponding string if a peer sends invalid UTF-8.
+  bytes id_json_bytes = 8;
+  bytes additional_fields_json_bytes = 9;
+  // A non-string or invalid UTF-8 version from a nonconforming peer.
+  bytes protocol_version_json_bytes = 10;
+  // When omitted, counts the encoded version token's original UTF-8 bytes.
+  uint64 omitted_protocol_version_bytes = 11;
+}
 message Observation {
   SessionRef session = 1;
   string cursor = 2;
@@ -150,6 +211,13 @@ message Observation {
     HistoryGap gap = 8;
     Extension extension = 9;
   }
+  // Passive provider evidence. A record can yield several semantic observations.
+  // Its original bytes appear on one observation in this session, in source_record
+  // or in extension when the event already carries the complete original.
+  Extension source_record = 11;
+  // Observation cursor of that original, including across history pages.
+  optional string source_cursor = 12;
+  WireProvenance wire_provenance = 13;
 }
 
 message ListSessionsRequest {

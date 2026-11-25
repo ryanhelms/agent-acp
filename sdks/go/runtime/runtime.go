@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -61,6 +62,9 @@ type Config struct {
 	OncePermissionsOnly bool
 	// SessionMeta supplies optional adapter setup metadata on creation and resume.
 	SessionMeta map[string]any
+	// SystemPromptAppend selects the standard ACP append mode when the peer
+	// advertises it. Provider-specific fallback can remain in SessionMeta.
+	SystemPromptAppend string
 	// ModelOnResume enforces an approved model before returning a resumed session.
 	ModelOnResume string
 	// ReadHistory reads native retained records without opening a live session.
@@ -335,8 +339,18 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		s.v2 = &v2Session{foreground: "idle"}
 	}
 	params := map[string]any{"cwd": cwd, "mcpServers": r.mcpServers(p.version)}
-	if r.config.SessionMeta != nil {
-		params["_meta"] = r.config.SessionMeta
+	meta := r.config.SessionMeta
+	standardPrompt := init.AgentCapabilities.SessionCapabilities.SystemPrompt != nil ||
+		v2 && init.Capabilities.Session.SystemPrompt != nil
+	if standardPrompt && r.config.SystemPromptAppend != "" {
+		params["systemPrompt"] = map[string]any{
+			"mode": "append", "content": []map[string]string{{"type": "text", "text": r.config.SystemPromptAppend}},
+		}
+		meta = maps.Clone(meta)
+		delete(meta, "systemPrompt")
+	}
+	if len(meta) != 0 {
+		params["_meta"] = meta
 	}
 	creating := id == ""
 	var configOptions []json.RawMessage

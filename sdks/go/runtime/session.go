@@ -140,7 +140,7 @@ type receiptResult struct{}
 
 func (*receiptResult) UnmarshalJSON([]byte) error { return nil }
 
-func (s *session) prompt(t *turn, blocks []map[string]string) {
+func (s *session) prompt(t *turn, blocks []any) {
 	params := map[string]any{"sessionId": s.info.Ref.SessionId, "prompt": blocks}
 	_, receipt, err := transport.SendRequestWithReceipt[receiptResult](s.p.conn, s.p.runtime.ctx, "session/prompt", params)
 	wire, result := wireRecord(receipt, "session/prompt", liveWindowBytes)

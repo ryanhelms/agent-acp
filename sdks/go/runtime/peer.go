@@ -64,13 +64,14 @@ type handshake struct {
 	Info              struct{ Name string }
 	AgentCapabilities struct {
 		LoadSession         bool
-		SessionCapabilities struct{ List, Resume *empty }
-		PromptCapabilities  struct{ Image, Audio bool }
+		SessionCapabilities struct{ List, Resume, SystemPrompt *empty }
+		PromptCapabilities  struct{ Image, Audio, EmbeddedContext bool }
 	}
 	Capabilities struct {
 		Session *struct {
-			Prompt struct{ Image, Audio *empty }
-			MCP    struct{ Stdio *empty }
+			Prompt       struct{ Image, Audio, EmbeddedContext *empty }
+			SystemPrompt *empty
+			MCP          struct{ Stdio *empty }
 		}
 	}
 }
@@ -228,6 +229,7 @@ func (r *Runtime) capabilities(init handshake) *model.Capabilities {
 			CanAnswer: true, CanInterrupt: true, CanResume: true, CanListSessions: true,
 			CanReadHistory: r.config.ReadHistory != nil || r.config.ReplayHistory,
 			CanPromptImage: session.Prompt.Image != nil, CanPromptAudio: session.Prompt.Audio != nil,
+			CanPromptEmbeddedContext: session.Prompt.EmbeddedContext != nil,
 		}
 	}
 	agent := init.AgentCapabilities
@@ -236,6 +238,7 @@ func (r *Runtime) capabilities(init handshake) *model.Capabilities {
 		CanAnswer: true, CanInterrupt: true, CanListSessions: agent.SessionCapabilities.List != nil,
 		CanReadHistory: r.config.ReadHistory != nil || (r.config.ReplayHistory && agent.LoadSession),
 		CanPromptImage: agent.PromptCapabilities.Image, CanPromptAudio: agent.PromptCapabilities.Audio,
+		CanPromptEmbeddedContext: agent.PromptCapabilities.EmbeddedContext,
 	}
 }
 

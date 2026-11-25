@@ -30,6 +30,8 @@ message Capabilities {
   bool can_interrupt = 3;
   bool can_list_sessions = 4;
   bool can_read_history = 5;
+  bool can_prompt_image = 6;
+  bool can_prompt_audio = 7;
 }
 
 message Session {
@@ -73,6 +75,19 @@ message SendRequest {
   string operation_id = 2;
   // Preserve whitespace and shell punctuation exactly.
   string text = 3;
+  // An ordered prompt. Use this or text, never both.
+  repeated PromptPart parts = 4;
+}
+message PromptPart {
+  oneof content {
+    string text = 1;
+    PromptMedia image = 2;
+    PromptMedia audio = 3;
+  }
+}
+message PromptMedia {
+  string mime_type = 1;
+  bytes data = 2;
 }
 message SendResponse {
   Receipt receipt = 1;
@@ -150,6 +165,12 @@ message Observation {
     HistoryGap gap = 8;
     Extension extension = 9;
   }
+  // Passive provider evidence. A record can yield several semantic observations.
+  // Its original bytes appear on one observation in this session, in source_record
+  // or in extension when the event already carries the complete original.
+  Extension source_record = 11;
+  // Observation cursor of that original, including across history pages.
+  optional string source_cursor = 12;
 }
 
 message ListSessionsRequest {

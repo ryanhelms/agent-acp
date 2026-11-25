@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,14 +25,65 @@ func (s *session) cursor(seq uint64) string { return s.epoch + "." + strconv.For
 // emit is called with the session lock held. The bounded window is disposable
 // transport state; durable reads go to the harness's native history reader.
 func (s *session) emit(event *model.Observation) {
-	s.sequence++
-	event.Cursor = s.cursor(s.sequence)
+	s.position(event)
+	s.retain(event, proto.Size(event))
+}
+
+func (s *session) position(event *model.Observation) {
+	event.Cursor = s.cursor(s.sequence + 1)
 	event.Session = s.info.Ref
 	if s.turn != nil {
 		event.TurnId = s.turn.id
 	}
+}
+
+// emitSource keeps the original record once, at the correlated observation.
+// A passive source with no semantic event is itself an extension observation.
+func (s *session) emitSource(event *model.Observation, kind string, raw json.RawMessage) *model.Observation {
+	event, source := withSource(event, kind, raw)
+	s.position(event)
+	event.SourceCursor = proto.String(event.Cursor)
+	if size := proto.Size(event); size <= liveWindowBytes {
+		s.retain(event, size)
+		return event
+	}
+	// A source bound is independent of replay continuity. Keep the semantic
+	// event at the same cursor and make only its oversized evidence unavailable.
+	omitSource(event, source, "live_window_limit", liveWindowBytes)
+	s.retain(event, proto.Size(event))
+	return event
+}
+
+func omitSource(event *model.Observation, source *model.Extension, reason string, limit int) {
+	updateParams := source.Type == ACPUpdateParamsSource
+	marker, _ := json.Marshal(struct {
+		SourceType string `json:"sourceType"`
+		Reason     string `json:"reason"`
+		ByteCount  int    `json:"byteCount"`
+	}{source.Type, reason, len(source.Data)})
+	source.Type, source.Data = "acp.source_omitted", marker
+	if updateParams && proto.Size(event) > limit {
+		// Even the typed preview cannot fit. Keep the gap at its own cursor
+		// without evicting the whole observation window.
+		event.SourceRecord = nil
+		event.Event = &model.Observation_Extension{Extension: source}
+	}
+}
+
+func withSource(event *model.Observation, kind string, raw json.RawMessage) (*model.Observation, *model.Extension) {
+	source := &model.Extension{Type: kind, MediaType: "application/json", Data: raw}
+	if event == nil {
+		event = &model.Observation{Event: &model.Observation_Extension{Extension: source}}
+	} else {
+		event.SourceRecord = source
+	}
+	return event, source
+}
+
+func (s *session) retain(event *model.Observation, size int) {
+	s.sequence++
 	s.events = append(s.events, event)
-	s.windowBytes += proto.Size(event)
+	s.windowBytes += size
 	for len(s.events) > liveWindow || s.windowBytes > liveWindowBytes {
 		s.windowBytes -= proto.Size(s.events[0])
 		s.events[0] = nil

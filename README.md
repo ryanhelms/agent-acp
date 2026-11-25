@@ -45,7 +45,11 @@ Use `npm run generate -- --language typescript` to regenerate one binding. Subst
 
 The Protobuf service describes a callable API. The generated clients pass a typed request to an injected runtime and expose typed replies and observations to their callers. The runtime resolves the harness instance, negotiates capabilities, opens the provider connection and handles transport errors. ACP, a provider SDK and a native history reader can all sit behind that interface. A local adapter can execute in the consuming application's process.
 
+Use the existing `SendRequest.text` field for a plain prompt or `parts` for ordered text, inline images, and inline audio. The Go ACP runtime exposes the peer's image and audio capabilities on the opened session and rejects unavailable media before sending the prompt. User previews show media descriptors. The request carries binary data as Protobuf bytes. [ACP content blocks](https://agentclientprotocol.com/protocol/v1/content) · [ACP capability negotiation](https://agentclientprotocol.com/protocol/v1/initialization)
+
 Configure each Go runtime with a stable harness instance, an adapter command and arguments, and an absolute working directory. Pass it to `agentacp.New`. The adapter starts on demand. Register stdio MCP servers through `runtime.Config.MCPServers`. Set `OncePermissionsOnly` to restrict permission prompts to one-time decisions. The runnable example shows the complete call sequence. [Go example entry point](sdks/go/cmd/session-example/main.go)
+
+When an ACP update carries a direct MCP result or a JSON-RPC tool reply in `rawOutput`, the Go runtime keeps its failure status and available display content together. The preview marks structured results and attachments. The original fields are available to the scoped source hook and ACP replay. [MCP tool results](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-result) · [ACP tool calls](https://agentclientprotocol.com/protocol/v1/tool-calls)
 
 | Operation | Go runtime behavior |
 | --- | --- |
@@ -55,10 +59,49 @@ Configure each Go runtime with a stable harness instance, an adapter command and
 | Reconnect an observer | Supply its last cursor. A gap signals that events fell outside the in-memory window or the live connection was replaced. Closing the observer releases the subscription. |
 | Browse and read history | `ListSessions` queries the live adapter’s native listing. `ReadHistory` uses the configured passive reader. Claude reads retained messages through the Claude Agent SDK. Codex uses App Server’s `thread/read` and `thread/turns/list`. |
 
+Passive Claude messages and Codex items retain their original JSON fields and native IDs. An observation's `sourceCursor` identifies the record in the same provider history. Its `sourceRecord` holds the original bytes, or its ordinary `extension` holds them when the event already carries the original. Multiple observations from a message can refer to one original on an earlier or later page. Use the response's `nextCursor` to continue paging. Codex turn metadata is retained separately from the ordered items it describes.
+
+A workspace-scoped `ListSessions` checks each agent-supplied primary working directory before returning a session. An existing directory may match by filesystem identity, including a symlink alias. For removed directories the exact absolute path must match. Entries with missing or unrelated directories are excluded. A filtered native page may be empty and still carry a `nextCursor`. Continue until the cursor is absent. [ACP session listing](https://agentclientprotocol.com/protocol/v1/session-list)
+
 Native storage and retention remain under provider control. A history-only runtime can omit the live adapter command. Live delivery receipts are held in memory during the runtime’s lifetime. Applications that need operation reconciliation across process restarts own their operation IDs and receipt records.
+
+## Retained ACP replay in Go
+
+Set `runtime.Config.ReplayHistory` for an adapter that supports standard ACP
+session loading. Pass an inactive session handle and its original working
+directory. The reader loads it in a disposable process with an empty MCP
+server list and cancels historical permission requests. It never sends a
+prompt or publishes a historical approval. The runtime blocks concurrent
+resume of the same session through its own handle while replay is in progress.
+
+`ReadHistory` pages normalized observations and original ACP source records.
+The cursor identifies the session and a hash of the replayed prefix. A changed
+prefix invalidates older pages. A custom `ReadHistory` function takes
+precedence when the host supplies a passive vendor reader. The host must
+prevent replay while another process still controls the conversation.
 
 ## Package releases
 
-The packages share the `agentacp.v1` contract. Keep compatible additions within that namespace and release changed language packages independently. The Go module currently uses the local development path `agent-acp.local/sdks/go`. Set the final hosting path in the Go module, schema and Go generator options before publishing it, then regenerate. The package manifests are local development manifests. A registry scope or repository URL can be chosen when publishing is authorized.
+The packages share the `agentacp.v1` contract. Keep compatible additions within that namespace and release changed language packages independently.
+
+Build a local release from an SDK checkout. The release builder stages the tracked source files, keeping local dependency directories and credentials outside the artifacts. Install the pinned Python wheel tools in an isolated environment and pass a new output directory.
+
+```sh
+python3 -m venv /tmp/agent-acp-release-tools
+/tmp/agent-acp-release-tools/bin/python -m pip install setuptools==80.9.0 wheel==0.45.1
+/tmp/agent-acp-release-tools/bin/python tools/release.py 0.1.0 dist/agent-acp-0.1.0
+```
+
+The output contains a Go module proxy directory for `agent-acp.local/sdks/go@v0.1.0`, an npm tarball, a Python wheel, the shared conformance fixture and a SHA-256 manifest. The Go archive includes the Go facade's conformance fixture. The npm and Python artifacts provide their generated clients and runtime interfaces. Set a fixed `SOURCE_DATE_EPOCH` for reproducible builds or use the default SDK commit timestamp.
+
+Use the proxy's `go/` directory as a `file://` Go proxy. For a new verified candidate, record the Go module and module-file hashes in the consumer's `go.sum`. Put the private module in `GONOSUMDB`. Go checks the consumer's pinned sums. Install the tarball with npm and the wheel with pip. Test a consumer outside the SDK checkout before distributing the files.
+
+A registry scope or final repository URL can be chosen when publishing is authorized. Preserve the stable `agentacp.v1` schema when changing distribution names.
 
 To add a language or change an operation, follow the [contributor instructions](AGENTS.md).
+
+### Session update metadata
+
+An ACP `session/update` can include additional fields beside `sessionId` and `update`. The Go runtime retains the full params for the bound session at the observation’s own cursor. Text and tools carry an `acp.session_update_params` source record. Other variants, including explicitly null or missing updates, can be inspected as passive extensions. Ordinary updates keep their existing shape. In the optional Go callback, `Body` is the inner update and `Params` contains the enriched params. `ParamsSize` identifies enriched updates even when the full evidence exceeded its byte budget. Treat the callback and observation as two ways to reach the same source at the same cursor.
+
+Passive ACP replay applies the same source type and uses its existing replay limits. Source omission carries the reason and original byte count. Cursors include enriched source values and tolerate reordered JSON object members between replay passes.

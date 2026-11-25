@@ -57,8 +57,37 @@ Configure each Go runtime with a stable harness instance, an adapter command and
 
 Native storage and retention remain under provider control. A history-only runtime can omit the live adapter command. Live delivery receipts are held in memory during the runtime’s lifetime. Applications that need operation reconciliation across process restarts own their operation IDs and receipt records.
 
+## Retained ACP replay in Go
+
+Set `runtime.Config.ReplayHistory` for an adapter that supports standard ACP
+session loading. Pass an inactive session handle and its original working
+directory. The reader loads it in a disposable process with an empty MCP
+server list and cancels historical permission requests. It never sends a
+prompt or publishes a historical approval. The runtime blocks concurrent
+resume of the same session through its own handle while replay is in progress.
+
+`ReadHistory` pages normalized observations and original ACP source records.
+The cursor identifies the session and a hash of the replayed prefix. A changed
+prefix invalidates older pages. A custom `ReadHistory` function takes
+precedence when the host supplies a passive vendor reader. The host must
+prevent replay while another process still controls the conversation.
+
 ## Package releases
 
-The packages share the `agentacp.v1` contract. Keep compatible additions within that namespace and release changed language packages independently. The Go module currently uses the local development path `agent-acp.local/sdks/go`. Set the final hosting path in the Go module, schema and Go generator options before publishing it, then regenerate. The package manifests are local development manifests. A registry scope or repository URL can be chosen when publishing is authorized.
+The packages share the `agentacp.v1` contract. Keep compatible additions within that namespace and release changed language packages independently.
+
+Build a local release from an SDK checkout. The release builder stages the tracked source files, keeping local dependency directories and credentials outside the artifacts. Install the pinned Python wheel tools in an isolated environment and pass a new output directory.
+
+```sh
+python3 -m venv /tmp/agent-acp-release-tools
+/tmp/agent-acp-release-tools/bin/python -m pip install setuptools==80.9.0 wheel==0.45.1
+/tmp/agent-acp-release-tools/bin/python tools/release.py 0.1.0 dist/agent-acp-0.1.0
+```
+
+The output contains a Go module proxy directory for `agent-acp.local/sdks/go@v0.1.0`, an npm tarball, a Python wheel, the shared conformance fixture and a SHA-256 manifest. The Go archive includes the Go facade's conformance fixture. The npm and Python artifacts provide their generated clients and runtime interfaces. Set a fixed `SOURCE_DATE_EPOCH` for reproducible builds or use the default SDK commit timestamp.
+
+Use the proxy's `go/` directory as a `file://` Go proxy. For a new verified candidate, record the Go module and module-file hashes in the consumer's `go.sum`. Put the private module in `GONOSUMDB`. Go checks the consumer's pinned sums. Install the tarball with npm and the wheel with pip. Test a consumer outside the SDK checkout before distributing the files.
+
+A registry scope or final repository URL can be chosen when publishing is authorized. Preserve the stable `agentacp.v1` schema when changing distribution names.
 
 To add a language or change an operation, follow the [contributor instructions](AGENTS.md).

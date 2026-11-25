@@ -211,6 +211,10 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 		if s.info != nil && msg.SessionID == s.info.Ref.SessionId && !s.closed {
 			if obs := normalizeUpdate(msg.Update); obs != nil {
 				s.emit(obs)
+				if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
+					ref := &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: s.info.Ref.SessionId}
+					capture(ACPUpdate{Session: ref, TurnID: obs.TurnId, Cursor: obs.Cursor, Body: append(json.RawMessage(nil), msg.Update...)})
+				}
 			}
 		}
 		return nil, nil
@@ -270,9 +274,9 @@ func (s *session) requestPermission(ctx context.Context, raw json.RawMessage) (a
 
 func normalizeUpdate(raw json.RawMessage) *model.Observation {
 	var u struct {
-		SessionUpdate                   string
-		Content                         json.RawMessage
-		ToolCallID, Title, Status, Kind string
+		SessionUpdate                         string
+		Content, RawOutput                    json.RawMessage
+		ToolCallID, Title, Name, Status, Kind string
 	}
 	if json.Unmarshal(raw, &u) != nil || u.SessionUpdate == "" {
 		return nil
@@ -292,21 +296,63 @@ func normalizeUpdate(raw json.RawMessage) *model.Observation {
 		if phase == "" {
 			phase = u.SessionUpdate
 		}
-		return &model.Observation{Event: &model.Observation_Tool{Tool: &model.ToolActivity{CallId: u.ToolCallID, Name: u.Title, Phase: phase, Summary: toolSummary(u.Content, u.Kind)}}}
+		name := u.Title
+		if name == "" {
+			name = u.Name
+		}
+		return &model.Observation{Event: &model.Observation_Tool{Tool: &model.ToolActivity{CallId: u.ToolCallID, Name: name, Phase: phase, Summary: toolSummary(u.Content, u.RawOutput, u.Kind)}}}
 	}
 	return &model.Observation{Event: &model.Observation_Extension{Extension: &model.Extension{Type: u.SessionUpdate, MediaType: "application/json", Data: raw}}}
 }
 
-// toolSummary takes the displayed result from ACP's typed content blocks.
-// Large output stays in the harness's native transcript.
-func toolSummary(raw json.RawMessage, kind string) string {
-	var blocks []struct {
-		Type, Path, TerminalID string
-		Content                struct{ Type, Text string }
+type toolContentBlock struct {
+	Type, Path, TerminalID string
+	Content                json.RawMessage
+}
+
+// toolSummary prefers ACP display blocks. Some adapters carry an MCP result
+// only inside rawOutput. Its typed content is suitable for the same preview.
+func toolSummary(raw, rawOutput json.RawMessage, kind string) string {
+	var blocks []toolContentBlock
+	if json.Unmarshal(raw, &blocks) == nil {
+		if summary := formatToolBlocks(blocks); summary != "" {
+			return summary
+		}
 	}
-	if json.Unmarshal(raw, &blocks) != nil {
-		return kind
+	var output struct {
+		Result *struct{ Content []json.RawMessage }
+		Error  *struct{ Message string }
 	}
+	if json.Unmarshal(rawOutput, &output) == nil {
+		if output.Result != nil {
+			blocks = make([]toolContentBlock, 0, len(output.Result.Content))
+			for _, part := range output.Result.Content {
+				blocks = append(blocks, toolContentBlock{Type: "content", Content: part})
+			}
+			if summary := formatToolBlocks(blocks); summary != "" {
+				return summary
+			}
+		}
+		if output.Error != nil && output.Error.Message != "" {
+			return boundedToolText(output.Error.Message)
+		}
+	}
+	return kind
+}
+
+func boundedToolText(text string) string {
+	const runeLimit = 1024
+	count := 0
+	for i := range text {
+		if count == runeLimit {
+			return text[:i] + "…"
+		}
+		count++
+	}
+	return text
+}
+
+func formatToolBlocks(blocks []toolContentBlock) string {
 	const runeLimit = 1024
 	var output strings.Builder
 	count := 0
@@ -314,9 +360,7 @@ func toolSummary(raw json.RawMessage, kind string) string {
 		var text string
 		switch block.Type {
 		case "content":
-			if block.Content.Type == "text" {
-				text = block.Content.Text
-			}
+			text = toolContentPreview(block.Content)
 		case "diff":
 			if block.Path != "" {
 				text = "Diff " + block.Path
@@ -344,8 +388,56 @@ func toolSummary(raw json.RawMessage, kind string) string {
 			count++
 		}
 	}
-	if output.Len() == 0 {
-		return kind
-	}
 	return output.String()
+}
+
+// toolContentPreview renders textual content and reference descriptors without
+// pulling external resources or copying embedded binary bytes into the preview.
+func toolContentPreview(raw json.RawMessage) string {
+	var block struct {
+		Type, Text, URI, MimeType, Name, Title, Description string
+		Size                                                *int64
+		Resource                                            struct {
+			URI, MimeType string
+			Text          *string
+		}
+	}
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return "[Unreadable ACP content block]"
+	}
+	var parts []string
+	switch block.Type {
+	case "text":
+		return block.Text
+	case "resource_link":
+		parts = []string{"[Resource link]", block.Title, block.Name, block.URI, block.MimeType}
+		if block.Size != nil {
+			parts = append(parts, fmt.Sprintf("%d bytes", *block.Size))
+		}
+		if block.Description != "" {
+			parts = append(parts, "\n"+block.Description)
+		}
+	case "resource":
+		parts = []string{"[Embedded resource]", block.Resource.URI, block.Resource.MimeType}
+		if block.Resource.Text != nil {
+			return joinPreviewParts(parts) + "\n" + *block.Resource.Text
+		}
+	case "image", "audio":
+		parts = []string{"[ACP " + block.Type + "]", block.MimeType, block.URI}
+	case "":
+		return "[ACP content type missing]"
+	default:
+		return "[ACP content: " + block.Type + "]"
+	}
+	return joinPreviewParts(parts)
+}
+
+func joinPreviewParts(parts []string) string {
+	var present []string
+	for _, part := range parts {
+		if part != "" {
+			present = append(present, part)
+		}
+	}
+	return strings.Join(present, " ")
 }

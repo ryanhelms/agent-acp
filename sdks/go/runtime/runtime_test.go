@@ -2,11 +2,15 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +18,7 @@ import (
 	"time"
 
 	agentacp "agent-acp.local/sdks/go"
+	"agent-acp.local/sdks/go/conformance"
 	model "agent-acp.local/sdks/go/model"
 )
 
@@ -52,7 +57,11 @@ func TestAdapterProcess(t *testing.T) {
 		}
 		switch row.Method {
 		case "initialize":
-			respond(row.ID, map[string]any{"protocolVersion": 1, "agentInfo": map[string]string{"name": "test"}, "agentCapabilities": map[string]any{"loadSession": true, "sessionCapabilities": map[string]any{"list": map[string]any{}}}})
+			media := os.Getenv("TEST_AGENT_ACP_TEXT_ONLY") != "yes"
+			respond(row.ID, map[string]any{"protocolVersion": 1, "agentInfo": map[string]string{"name": "test"}, "agentCapabilities": map[string]any{
+				"loadSession": os.Getenv("TEST_AGENT_ACP_NO_LOAD") != "yes", "sessionCapabilities": map[string]any{"list": map[string]any{}},
+				"promptCapabilities": map[string]bool{"image": media, "audio": media},
+			}})
 		case "session/new":
 			var req struct {
 				Cwd        string
@@ -67,31 +76,84 @@ func TestAdapterProcess(t *testing.T) {
 			if req.Cwd == "" || len(req.MCPServers) != 1 || req.MCPServers[0].Args[0] != "literal `$HOME`" || req.Meta["test"] != "value" || req.MCPServers[0].Env[0]["value"] != "test" {
 				os.Exit(3)
 			}
+			if os.Getenv("TEST_AGENT_ACP_CONFORMANCE") == "yes" {
+				if err := os.WriteFile(filepath.Join(req.Cwd, sessionID+".fixture-session"), []byte(sessionID), 0600); err != nil {
+					os.Exit(22)
+				}
+			}
 			respond(row.ID, map[string]any{"sessionId": sessionID, "configOptions": []map[string]string{{"id": "model-select", "category": "model", "type": "select"}}})
 		case "session/load":
-			var req struct{ SessionID string }
+			var req struct {
+				SessionID  string
+				Cwd        string
+				MCPServers []json.RawMessage
+			}
 			json.Unmarshal(row.Params, &req)
 			sessionID = req.SessionID
-			update("user_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "old text"}})
+			if os.Getenv("TEST_AGENT_ACP_REPLAY") == "yes" {
+				if req.Cwd != os.Getenv("TEST_AGENT_ACP_REPLAY_CWD") || req.MCPServers == nil || len(req.MCPServers) != 0 {
+					os.Exit(12)
+				}
+				sessionID = "unrelated-peer"
+				update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "wrong session"}})
+				sessionID = req.SessionID
+				update("user_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "literal prompt " + os.Getenv("TEST_AGENT_ACP_REPLAY_CHANGE")}})
+				update("tool_call", map[string]any{"toolCallId": "tool-7", "title": "Read file", "status": "completed",
+					"rawInput": map[string]string{"path": "sample.txt"}, "rawOutput": map[string]any{"result": map[string]any{
+						"content": []map[string]string{{"type": "text", "text": "retained result"}},
+					}}})
+				update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "Assistant text"}})
+			} else {
+				update("user_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "old text"}})
+			}
 			permission(80)
 			// Wait for a cancelled permission before completing the resume handshake.
 			turn = row.ID
 		case "session/prompt":
+			if os.Getenv("TEST_AGENT_ACP_REPLAY") == "yes" {
+				os.Exit(13)
+			}
 			var req struct {
 				SessionID string
-				Prompt    []struct{ Text string }
+				Prompt    []map[string]string
 			}
 			json.Unmarshal(row.Params, &req)
 			if sessionID != req.SessionID {
 				os.Exit(4)
 			}
 			turn = row.ID
-			text := req.Prompt[0].Text
+			text := req.Prompt[0]["text"]
 			switch text {
+			case "  Media before\n":
+				if len(req.Prompt) != 5 || req.Prompt[1]["type"] != "image" || req.Prompt[1]["mimeType"] != "image/png" ||
+					req.Prompt[1]["data"] != "AAH/" || req.Prompt[2]["text"] != "\tBetween\n" ||
+					req.Prompt[3]["type"] != "audio" || req.Prompt[3]["mimeType"] != "audio/wav" ||
+					req.Prompt[3]["data"] != "AgM=" || req.Prompt[4]["text"] != "After  " {
+					os.Exit(14)
+				}
+				update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "media prompt verified"}})
+				respond(turn, map[string]string{"stopReason": "end_turn"})
 			case "wait":
 				update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "waiting"}})
 			case "disconnect":
 				os.Exit(0)
+			case "Fingerprint the attached conformance image.", "Fingerprint the attached conformance audio.":
+				kind, mime := "image", "image/png"
+				if strings.HasSuffix(text, "audio.") {
+					kind, mime = "audio", "audio/wav"
+				}
+				if len(req.Prompt) != 2 || req.Prompt[1]["type"] != kind || req.Prompt[1]["mimeType"] != mime {
+					os.Exit(21)
+				}
+				data, err := base64.StdEncoding.DecodeString(req.Prompt[1]["data"])
+				if err != nil {
+					os.Exit(21)
+				}
+				update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": fmt.Sprintf("sha256:%x", sha256.Sum256(data))}})
+				respond(turn, map[string]string{"stopReason": "end_turn"})
+			case conformancePrompt:
+				update("tool_call", map[string]any{"toolCallId": "tool-7", "title": "Read file", "status": "in_progress"})
+				permission(71)
 			case "ask":
 				update("tool_call", map[string]any{"toolCallId": "tool-7", "title": "Read file", "status": "in_progress"})
 				permission(70)
@@ -114,6 +176,32 @@ func TestAdapterProcess(t *testing.T) {
 
 			respond(row.ID, map[string]any{})
 		case "session/list":
+			if table := os.Getenv("TEST_AGENT_ACP_LIST_PAGES"); table != "" {
+				var pages map[string]json.RawMessage
+				var req struct{ Cursor string }
+				raw, err := os.ReadFile(table)
+				if err != nil || json.Unmarshal(raw, &pages) != nil || json.Unmarshal(row.Params, &req) != nil || pages[req.Cursor] == nil {
+					os.Exit(24)
+				}
+				respond(row.ID, pages[req.Cursor])
+				continue
+			}
+			if os.Getenv("TEST_AGENT_ACP_CONFORMANCE") == "yes" {
+				var req struct{ Cwd string }
+				if json.Unmarshal(row.Params, &req) != nil || req.Cwd == "" {
+					os.Exit(23)
+				}
+				files, err := filepath.Glob(filepath.Join(req.Cwd, "*.fixture-session"))
+				if err != nil {
+					os.Exit(23)
+				}
+				var sessions []map[string]string
+				for _, file := range files {
+					sessions = append(sessions, map[string]string{"sessionId": strings.TrimSuffix(filepath.Base(file), ".fixture-session"), "cwd": req.Cwd})
+				}
+				respond(row.ID, map[string]any{"sessions": sessions})
+				continue
+			}
 			respond(row.ID, map[string]any{"sessions": []map[string]string{{"sessionId": "a", "title": "A"}, {"sessionId": "b", "title": "B"}}})
 		case "":
 			var result struct {
@@ -128,8 +216,14 @@ func TestAdapterProcess(t *testing.T) {
 				turn = nil
 				continue
 			}
-			if string(row.ID) != "70" || result.Outcome.Outcome != "selected" || result.Outcome.OptionID != "once" {
+			if (string(row.ID) != "70" && string(row.ID) != "71") || result.Outcome.Outcome != "selected" || result.Outcome.OptionID != "once" {
 				os.Exit(7)
+			}
+			if string(row.ID) == "71" {
+				update("tool_call_update", map[string]any{"toolCallId": "tool-7", "status": "completed", "content": []map[string]any{
+					{"type": "content", "content": map[string]string{"type": "text", "text": "fixture bytes"}},
+				}})
+				update("fixture_resource", map[string]any{"uri": "fixture://missing", "reason": "resource unavailable"})
 			}
 			update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "permission received"}})
 			respond(turn, map[string]string{"stopReason": "end_turn"})
@@ -138,6 +232,70 @@ func TestAdapterProcess(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func TestMediaPromptUsesNegotiatedACPContentBlocks(t *testing.T) {
+	media := []*model.PromptPart{
+		{Content: &model.PromptPart_Text{Text: "  Media before\n"}},
+		{Content: &model.PromptPart_Image{Image: &model.PromptMedia{MimeType: "image/png", Data: []byte{0, 1, 255}}}},
+		{Content: &model.PromptPart_Text{Text: "\tBetween\n"}},
+		{Content: &model.PromptPart_Audio{Audio: &model.PromptMedia{MimeType: "audio/wav", Data: []byte{2, 3}}}},
+		{Content: &model.PromptPart_Text{Text: "After  "}},
+	}
+	t.Run("advertised", func(t *testing.T) {
+		_, client, ctx := newTestRuntime(t)
+		session, err := client.Open(ctx, &model.OpenRequest{HarnessInstance: "unit"})
+		if err != nil || !session.GetSession().GetCapabilities().GetCanPromptImage() || !session.GetSession().GetCapabilities().GetCanPromptAudio() {
+			t.Fatalf("prompt capabilities did not survive negotiation: %v, %v", session, err)
+		}
+		ref := session.GetSession().GetRef()
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "ambiguous", Text: "overlap", Parts: media}); err == nil {
+			t.Fatal("accepted a mixed legacy and ordered prompt")
+		}
+		invalid := []*model.PromptPart{{Content: &model.PromptPart_Image{Image: &model.PromptMedia{MimeType: "audio/wav", Data: []byte{1}}}}}
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "invalid", Parts: invalid}); err == nil {
+			t.Fatal("accepted an image with an audio MIME type")
+		}
+		req := &model.SendRequest{Session: ref, OperationId: "media", Parts: media}
+		sent, err := client.Send(ctx, req)
+		if err != nil || sent.GetReceipt().GetStatus() != model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED {
+			t.Fatalf("media prompt was not accepted: %v, %v", sent, err)
+		}
+		if _, err := client.Send(ctx, req); err != nil {
+			t.Fatalf("identical media prompt did not recover its receipt: %v", err)
+		}
+		observed := false
+		for event, err := range client.Observe(ctx, &model.ObserveRequest{Session: ref}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := event.GetText(); text.GetSpeaker() == model.Speaker_SPEAKER_USER &&
+				(!strings.Contains(text.GetText(), "[ACP image] image/png") || strings.Contains(text.GetText(), "AAH/")) {
+				t.Fatalf("incorrect prompt preview: %q", text.GetText())
+			}
+			if event.GetText().GetText() == "media prompt verified" {
+				observed = true
+			}
+			if event.GetTurnEnded() != nil {
+				break
+			}
+		}
+		if !observed {
+			t.Fatal("adapter did not confirm the ordered prompt")
+		}
+	})
+	t.Run("unavailable", func(t *testing.T) {
+		t.Setenv("TEST_AGENT_ACP_TEXT_ONLY", "yes")
+		_, client, ctx := newTestRuntime(t)
+		ref := opened(t, client, ctx)
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "unsupported", Parts: media}); err == nil ||
+			!strings.Contains(err.Error(), "does not support image prompts") {
+			t.Fatalf("unsupported prompt did not fail before dispatch: %v", err)
+		}
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "plain", Text: "plain still works"}); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func newTestRuntime(t *testing.T) (*Runtime, *agentacp.Sessions, context.Context) {
@@ -344,6 +502,100 @@ func TestNativeSessionListingPages(t *testing.T) {
 	}
 }
 
+// Some installed ACP agents advertise session/list but return their global
+// directory even when asked for one checkout. The SDK must apply the scope on
+// every raw page and on every continuation through a partially consumed page.
+func TestSessionListingEnforcesDirectoryAcrossNativeAndPortablePages(t *testing.T) {
+	rt, client, ctx := newTestRuntime(t)
+	selected, other := t.TempDir(), t.TempDir()
+	link := filepath.Join(t.TempDir(), "selected-link")
+	if err := os.Symlink(selected, link); err != nil {
+		t.Fatal(err)
+	}
+	row := func(id, cwd string) map[string]string {
+		return map[string]string{"sessionId": id, "cwd": cwd, "title": "title-" + id}
+	}
+	pages := map[string]any{
+		"": map[string]any{"sessions": []map[string]string{row("foreign", other), row("relative", "relative")}, "nextCursor": "native-2"},
+		"native-2": map[string]any{"sessions": []any{row("a", selected), map[string]string{"sessionId": "no-cwd"},
+			map[string]any{"sessionId": "additional", "cwd": other, "additionalDirectories": []string{selected}}, row("b", link), row("after", other)}, "nextCursor": "native-3"},
+		"native-3": map[string]any{"sessions": []map[string]string{row("c", selected)}},
+	}
+	source := filepath.Join(t.TempDir(), "pages.json")
+	raw, err := json.Marshal(pages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt.config.Env["TEST_AGENT_ACP_LIST_PAGES"] = source
+	q := &model.ListSessionsRequest{HarnessInstance: "unit", WorkingDirectory: selected, Limit: 1}
+	var got []string
+	for i := 0; ; i++ {
+		if i > 4 {
+			t.Fatal("listing failed to advance")
+		}
+		result, err := client.ListSessions(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Sessions) > 1 {
+			t.Fatal("listing exceeded its requested page size")
+		}
+		for _, session := range result.Sessions {
+			got = append(got, session.GetRef().GetSessionId())
+		}
+		if i == 0 {
+			if len(result.Sessions) != 0 || result.NextCursor == "" {
+				t.Fatal("filtered-empty native page did not preserve the continuation")
+			}
+			otherQuery := &model.ListSessionsRequest{HarnessInstance: "unit", WorkingDirectory: other, Cursor: result.NextCursor}
+			if _, err := client.ListSessions(ctx, otherQuery); err == nil {
+				t.Fatal("new cursor accepted a different directory")
+			}
+		}
+		if result.NextCursor == "" {
+			break
+		}
+		q.Cursor = result.NextCursor
+	}
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Fatalf("scoped session IDs: %v", got)
+	}
+	// Legacy offsets counted rows on the original native page. Apply that
+	// position before filtering, including when it points at an excluded row.
+	token, _ := json.Marshal(pageCursor{Page: "native-2", Offset: 1})
+	q.Cursor = base64.RawURLEncoding.EncodeToString(token)
+	gotPage, err := client.ListSessions(ctx, q)
+	if err != nil || len(gotPage.GetSessions()) != 1 || gotPage.Sessions[0].GetRef().GetSessionId() != "b" {
+		t.Fatal("old cursor resumed at the wrong record", err)
+	}
+	q.WorkingDirectory, q.Cursor, q.Limit = "", "", 0
+	all, err := client.ListSessions(ctx, q)
+	if err != nil || len(all.GetSessions()) != 2 || all.Sessions[0].GetRef().GetSessionId() != "foreign" {
+		t.Fatal("unfiltered listing lost native records", err)
+	}
+}
+
+func TestSessionListingAbsentWorkspaceRetainsOnlyItsExactPath(t *testing.T) {
+	rt, client, ctx := newTestRuntime(t)
+	cwd := filepath.Join(t.TempDir(), "removed")
+	pages := map[string]any{"": map[string]any{"sessions": []map[string]string{
+		{"sessionId": "archive", "cwd": cwd}, {"sessionId": "lookalike", "cwd": cwd + "-other"}, {"sessionId": "unknown"},
+	}}}
+	raw, _ := json.Marshal(pages)
+	file := filepath.Join(t.TempDir(), "pages.json")
+	if err := os.WriteFile(file, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	rt.config.Env["TEST_AGENT_ACP_LIST_PAGES"] = file
+	result, err := client.ListSessions(ctx, &model.ListSessionsRequest{HarnessInstance: "unit", WorkingDirectory: cwd})
+	if err != nil || len(result.GetSessions()) != 1 || result.Sessions[0].Ref.SessionId != "archive" {
+		t.Fatal("archived directory listing lost its scope", err)
+	}
+}
+
 func TestObserverReportsGapWhenLiveWindowExpires(t *testing.T) {
 	s := newSession()
 	s.info = &model.Session{Ref: &model.SessionRef{HarnessInstance: "test", SessionId: "s"}}
@@ -360,6 +612,77 @@ func TestObserverReportsGapWhenLiveWindowExpires(t *testing.T) {
 	}
 }
 
+func TestSourceUpdateCarriesOriginalBodyAndObservationIdentity(t *testing.T) {
+	r, c, ctx := newTestRuntime(t)
+	captured := make(chan ACPUpdate, 4)
+	r.config.OnACPUpdate = func(update ACPUpdate) {
+		captured <- update
+	}
+	ref := opened(t, c, ctx)
+	send(t, c, ctx, ref, "source-turn", "hello from source")
+	stream := observe(t, r, ctx, ref, "")
+	defer stream.Close()
+	event := recv(t, stream)
+	for event.GetText().GetSpeaker() == model.Speaker_SPEAKER_USER {
+		event = recv(t, stream)
+	}
+	select {
+	case source := <-captured:
+		if source.Cursor != event.Cursor || source.TurnID != "source-turn" ||
+			source.Session.GetHarnessInstance() != ref.HarnessInstance || source.Session.GetSessionId() != ref.SessionId ||
+			!strings.Contains(string(source.Body), "hello from source") || !strings.Contains(string(source.Body), "agent_message_chunk") {
+			t.Fatalf("lost source or observation binding: %+v", source)
+		}
+	case <-ctx.Done():
+		t.Fatal("source update did not arrive")
+	}
+}
+
+func TestMCPRawResultProvidesTypedToolPreview(t *testing.T) {
+	raw := json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"ask-1","status":"completed","rawOutput":{"result":{"content":[{"type":"text","text":"Request q-fixture"},{"type":"image","mimeType":"image/png","data":"INLINE_SECRET"}]},"error":null,"other":"PRIVATE_PEER_FIELD"}}`)
+	tool := normalizeUpdate(raw).GetTool()
+	if tool.GetCallId() != "ask-1" || tool.GetPhase() != "completed" ||
+		tool.GetSummary() != "Request q-fixture\n[ACP image] image/png" {
+		t.Fatal(tool)
+	}
+}
+
+func TestMCPFailuresPreservePartialOutputAndSource(t *testing.T) {
+	for _, test := range []struct {
+		name, fields, phase, summary string
+	}{
+		{"direct result", `"status":"completed","rawOutput":{"isError":true,"structuredContent":{"details":"original private detail"},"content":[{"type":"text","text":"Partial result"},{"type":"audio","mimeType":"audio/wav","data":"PRIVATE_AUDIO"}]}`,
+			"failed", "[Structured MCP result]\nPartial result\n[ACP audio] audio/wav"},
+		{"wrapped result", `"status":"completed","content":[{"type":"content","content":{"type":"text","text":"ACP partial result"}}],"rawOutput":{"result":{"isError":true,"content":[{"type":"text","text":"ACP partial result"}]}}`,
+			"failed", "ACP partial result"},
+		{"protocol failure", `"status":"completed","content":[{"type":"content","content":{"type":"text","text":"ACP partial result"}}],"rawOutput":{"error":{"code":-32603,"message":"Tool service disconnected","data":"PRIVATE_ERROR"}}`,
+			"failed", "Tool service disconnected\nACP partial result"},
+		{"cancelled ACP call", `"status":"cancelled","rawOutput":{"isError":true,"content":[{"type":"text","text":"Stopped"}]}`,
+			"cancelled", "Stopped"},
+		{"direct success", `"status":"completed","rawOutput":{"isError":false,"content":[{"type":"text","text":"MCP output"}]}`,
+			"completed", "MCP output"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"fixture",` + test.fields + "}")
+			tool := normalizeUpdate(raw).GetTool()
+			if tool.GetPhase() != test.phase || tool.GetSummary() != test.summary {
+				t.Fatalf("incorrect tool preview: %v", tool)
+			}
+			history := replayRecords(raw)
+			if len(history) != 2 || history[0].GetTool().GetPhase() != test.phase ||
+				history[0].GetTool().GetSummary() != test.summary || history[1].GetExtension().GetType() != ACPReplaySource {
+				t.Fatalf("replay diverged from the live preview or dropped the original record: %v", history)
+			}
+			original := history[1].GetExtension().GetData()
+			for _, marker := range []string{"original private detail", "PRIVATE_AUDIO", "PRIVATE_ERROR"} {
+				if bytes.Contains(raw, []byte(marker)) && !bytes.Contains(original, []byte(marker)) {
+					t.Fatalf("replay source omitted %q", marker)
+				}
+			}
+		})
+	}
+}
+
 func TestToolSummaryUsesDisplayContent(t *testing.T) {
 	raw := json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"call-1","kind":"other","status":"completed","rawOutput":{"secret":"private peer metadata"},"content":[{"type":"content","content":{"type":"text","text":"Worker created."}},{"type":"diff","path":"README.md","newText":"not a preview"},{"type":"terminal","terminalId":"term-2"}]}`)
 	tool := normalizeUpdate(raw).GetTool()
@@ -371,7 +694,103 @@ func TestToolSummaryUsesDisplayContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolSummary(raw, "other"); got != strings.Repeat("界", 1024)+"…" {
+	if got, _ := toolSummary(raw, nil, "other"); got != strings.Repeat("界", 1024)+"…" {
 		t.Fatal("invalid truncation length", len(got))
+	}
+}
+
+func TestToolSummaryIncludesVisibleResourceDescriptors(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"content","content":{"type":"text","text":"partial result"}},
+		{"type":"content","content":{"type":"resource_link","name":"plan.md","uri":"fixture://plan","mimeType":"text/markdown","size":0}},
+		{"type":"content","content":{"type":"resource","resource":{"uri":"fixture://inline","text":"inline draft"}}},
+		{"type":"content","content":{"type":"image","mimeType":"image/png","data":"BINARY_MARKER"}},
+		{"type":"content","content":{"type":"future_block","extra":"unknown"}}
+	]`)
+	got, _ := toolSummary(raw, nil, "other")
+	for _, part := range []string{"partial result", "plan.md fixture://plan text/markdown 0 bytes", "fixture://inline", "inline draft", "[ACP image] image/png", "[ACP content: future_block]"} {
+		if !strings.Contains(got, part) {
+			t.Fatalf("missing preview %q in %q", part, got)
+		}
+	}
+	if strings.Contains(got, "BINARY_MARKER") {
+		t.Fatalf("binary data leaked into the preview: %q", got)
+	}
+}
+
+const conformancePrompt = "  Read the fixture. Preserve $HOME and \"quotes\".\n"
+
+func TestExecutableAdapterPortableConformance(t *testing.T) {
+	rt, _, ctx := newTestRuntime(t)
+	rt.config.Env["TEST_AGENT_ACP_CONFORMANCE"] = "yes"
+	err := conformance.Check(ctx, rt, conformance.Target{HarnessInstance: rt.config.HarnessInstance, WorkingDirectory: rt.config.WorkingDirectory},
+		conformance.Scenario{
+			Prompt: conformancePrompt, PermissionPrompt: "Allow reading file?", ChoiceLabel: "Allow once",
+			ToolResultMarker: "fixture bytes", CompletionMarker: "permission received",
+			InterruptPrompt: "wait", InterruptReady: "waiting",
+			ExtensionType: "fixture_resource", ExtensionDataMarker: "resource unavailable",
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadACPReplayPages(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cwd := t.TempDir()
+	ref := &model.SessionRef{HarnessInstance: "replay", SessionId: "saved-session"}
+	start := func(extra map[string]string) *agentacp.Sessions {
+		t.Helper()
+		env := map[string]string{"TEST_AGENT_ACP_HELPER": "yes", "TEST_AGENT_ACP_REPLAY": "yes", "TEST_AGENT_ACP_REPLAY_CWD": cwd}
+		for key, value := range extra {
+			env[key] = value
+		}
+		rt, err := New(Config{HarnessInstance: ref.HarnessInstance, Command: os.Args[0], Args: []string{"-test.run=^TestAdapterProcess$"},
+			WorkingDirectory: cwd, Env: env, ReplayHistory: true, MCPServers: []MCPServer{{Name: "must-not-launch", Command: "forbidden"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = rt.Close() })
+		return agentacp.New(rt)
+	}
+
+	sdk := start(nil)
+	first, err := sdk.ReadHistory(ctx, &model.ReadHistoryRequest{Session: ref, Limit: 2})
+	if err != nil || len(first.Observations) != 2 || first.NextCursor == "" ||
+		first.Observations[0].GetText().GetText() != "literal prompt " || first.Observations[1].GetExtension().GetType() != ACPReplaySource {
+		t.Fatalf("first ACP replay page: %v, %v", first, err)
+	}
+	savedCursor := first.NextCursor
+	records := append([]*model.Observation(nil), first.Observations...)
+	for cursor := savedCursor; cursor != ""; {
+		page, err := sdk.ReadHistory(ctx, &model.ReadHistoryRequest{Session: ref, Limit: 2, Cursor: cursor})
+		if err != nil || page.NextCursor == cursor || len(records) >= 7 {
+			t.Fatalf("replay page failed to advance: %v, %v", page, err)
+		}
+		records = append(records, page.Observations...)
+		cursor = page.NextCursor
+	}
+	if len(records) != 7 || records[2].GetTool().GetPhase() != "tool_call" ||
+		records[3].GetTool().GetSummary() != "retained result" ||
+		!strings.Contains(string(records[4].GetExtension().GetData()), "sample.txt") ||
+		records[5].GetText().GetText() != "Assistant text" {
+		t.Fatalf("ACP replay lost ordered call, result or source: %v", records)
+	}
+	for _, record := range records {
+		if record.GetSession().GetSessionId() != ref.SessionId || record.Cursor == "" || record.GetInput() != nil {
+			t.Fatalf("ACP replay returned an actionable or unrelated record: %v", record)
+		}
+	}
+	if _, err := sdk.ReadHistory(ctx, &model.ReadHistoryRequest{Session: &model.SessionRef{HarnessInstance: ref.HarnessInstance, SessionId: "other"}, Cursor: savedCursor}); err == nil {
+		t.Fatal("replay cursor crossed sessions")
+	}
+	if _, err := start(map[string]string{"TEST_AGENT_ACP_REPLAY_CHANGE": "edited"}).ReadHistory(ctx,
+		&model.ReadHistoryRequest{Session: ref, Cursor: savedCursor}); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("modified replay prefix did not invalidate cursor: %v", err)
+	}
+	if _, err := start(map[string]string{"TEST_AGENT_ACP_NO_LOAD": "yes"}).ReadHistory(ctx,
+		&model.ReadHistoryRequest{Session: ref}); err == nil || !strings.Contains(err.Error(), "does not advertise") {
+		t.Fatalf("unadvertised load was not rejected: %v", err)
 	}
 }

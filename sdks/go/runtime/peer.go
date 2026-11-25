@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -60,6 +62,7 @@ type handshake struct {
 	AgentCapabilities struct {
 		LoadSession         bool
 		SessionCapabilities struct{ List, Resume *empty }
+		PromptCapabilities  struct{ Image, Audio bool }
 	}
 }
 
@@ -159,7 +162,13 @@ func (p *peer) close() {
 }
 
 func (r *Runtime) capabilities(init handshake) *model.Capabilities {
-	return &model.Capabilities{CanResume: init.AgentCapabilities.LoadSession || init.AgentCapabilities.SessionCapabilities.Resume != nil, CanAnswer: true, CanInterrupt: true, CanReadHistory: r.config.ReadHistory != nil, CanListSessions: init.AgentCapabilities.SessionCapabilities.List != nil}
+	agent := init.AgentCapabilities
+	return &model.Capabilities{
+		CanResume: agent.LoadSession || agent.SessionCapabilities.Resume != nil,
+		CanAnswer: true, CanInterrupt: true, CanListSessions: agent.SessionCapabilities.List != nil,
+		CanReadHistory: r.config.ReadHistory != nil || (r.config.ReplayHistory && agent.LoadSession),
+		CanPromptImage: agent.PromptCapabilities.Image, CanPromptAudio: agent.PromptCapabilities.Audio,
+	}
 }
 
 func (r *Runtime) mcpServers() []map[string]any {
@@ -180,15 +189,37 @@ func (r *Runtime) mcpServers() []map[string]any {
 }
 
 type pageCursor struct {
+	Scope  string `json:",omitempty"`
 	Page   string
 	Offset int
 }
 
+// An existing directory can have a symlink, case variant or alternate native
+// spelling. Compare filesystem identity without opening any listed files.
+// For a removed workspace only the identical absolute path is accepted.
+func sameListedDirectory(requested string, info os.FileInfo, reported string) bool {
+	if info == nil || !info.IsDir() || !filepath.IsAbs(reported) {
+		return false
+	}
+	// A reported UNC share must not initiate a connection to an unrelated
+	// network resource while validating a local or differently scoped query.
+	volume := filepath.VolumeName(reported)
+	if strings.HasPrefix(volume, `\\`) && !strings.EqualFold(volume, filepath.VolumeName(requested)) {
+		return false
+	}
+	other, err := os.Stat(reported)
+	return err == nil && other.IsDir() && os.SameFile(info, other)
+}
+
 func (r *Runtime) list(ctx context.Context, q *model.ListSessionsRequest, out *model.ListSessionsResponse) error {
+	if q.WorkingDirectory != "" && !filepath.IsAbs(q.WorkingDirectory) {
+		return errors.New("working directory must be absolute")
+	}
+	scope := fmt.Sprintf("%x", sha256.Sum256([]byte(q.HarnessInstance+"\x00"+q.WorkingDirectory)))
 	var cursor pageCursor
 	if q.Cursor != "" {
 		raw, err := base64.RawURLEncoding.DecodeString(q.Cursor)
-		if err != nil || json.Unmarshal(raw, &cursor) != nil || cursor.Offset < 0 {
+		if err != nil || json.Unmarshal(raw, &cursor) != nil || cursor.Offset < 0 || (cursor.Scope != "" && cursor.Scope != scope) {
 			return errors.New("invalid session list cursor")
 		}
 	}
@@ -205,9 +236,6 @@ func (r *Runtime) list(ctx context.Context, q *model.ListSessionsRequest, out *m
 	}
 	params := map[string]any{}
 	if q.WorkingDirectory != "" {
-		if !filepath.IsAbs(q.WorkingDirectory) {
-			return errors.New("working directory must be absolute")
-		}
 		params["cwd"] = q.WorkingDirectory
 	}
 	if cursor.Page != "" {
@@ -215,7 +243,7 @@ func (r *Runtime) list(ctx context.Context, q *model.ListSessionsRequest, out *m
 	}
 	page, err := rpc[struct {
 		NextCursor string
-		Sessions   []struct{ SessionID, Title string }
+		Sessions   []struct{ SessionID, Title, Cwd string }
 	}](ctx, p, "session/list", params)
 	if err != nil {
 		return err
@@ -223,14 +251,40 @@ func (r *Runtime) list(ctx context.Context, q *model.ListSessionsRequest, out *m
 	if cursor.Offset > len(page.Sessions) {
 		return errors.New("session list changed since the last page")
 	}
-	rest := page.Sessions[cursor.Offset:]
-	next := pageCursor{Page: page.NextCursor}
-	if q.Limit > 0 && uint64(q.Limit) < uint64(len(rest)) {
-		rest = rest[:q.Limit]
-		next = pageCursor{Page: cursor.Page, Offset: cursor.Offset + len(rest)}
+	var directory os.FileInfo
+	if q.WorkingDirectory != "" {
+		directory, _ = os.Stat(q.WorkingDirectory)
+		if directory != nil && !directory.IsDir() {
+			return errors.New("session listing scope is not a directory")
+		}
 	}
-	for _, s := range rest {
-		out.Sessions = append(out.Sessions, &model.Session{Ref: &model.SessionRef{HarnessInstance: r.config.HarnessInstance, SessionId: s.SessionID}, Capabilities: caps, DisplayName: s.Title})
+	// A native page can include many sessions from the same directory.
+	aliases := map[string]bool{}
+	next := pageCursor{Scope: scope, Page: page.NextCursor}
+	for index := cursor.Offset; index < len(page.Sessions); index++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		item := page.Sessions[index]
+		if q.WorkingDirectory != "" && item.Cwd != q.WorkingDirectory {
+			match, seen := aliases[item.Cwd]
+			if !seen {
+				match = sameListedDirectory(q.WorkingDirectory, directory, item.Cwd)
+				aliases[item.Cwd] = match
+			}
+			if !match {
+				continue
+			}
+		}
+		if q.Limit > 0 && uint64(len(out.Sessions)) >= uint64(q.Limit) {
+			// Offset belongs to the original page, including excluded rows.
+			next = pageCursor{Scope: scope, Page: cursor.Page, Offset: index}
+			break
+		}
+		out.Sessions = append(out.Sessions, &model.Session{Ref: &model.SessionRef{HarnessInstance: r.config.HarnessInstance, SessionId: item.SessionID}, Capabilities: caps, DisplayName: item.Title})
+	}
+	if next.Page != "" && next.Page == cursor.Page && next.Offset <= cursor.Offset {
+		return errors.New("session listing repeated its native cursor")
 	}
 	if next.Page != "" || next.Offset > 0 {
 		b, _ := json.Marshal(next)

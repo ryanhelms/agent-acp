@@ -5,7 +5,8 @@
     "replies": [{
       "observations": [{
         "session": {"harnessInstance": "remote", "sessionId": "same-id"}, "cursor": "previous",
-        "turnId": "history-turn", "input": {"requestId": "historical", "prompt": "An old decision"}
+        "sourceRecord": {"type": "fixture.message", "mediaType": "application/json", "data": "e30="},
+        "sourceCursor": "previous", "turnId": "history-turn", "input": {"requestId": "historical", "prompt": "An old decision"}
       }],
       "nextCursor": "opaque/page+2=="
     }]
@@ -13,12 +14,23 @@
   {
     "operation": "Open",
     "request": {"harnessInstance": "local", "workingDirectory": "/tmp/with a space"},
-    "replies": [{"session": {"ref": {"harnessInstance": "local", "sessionId": "same-id"}, "capabilities": {"canAnswer": true, "canInterrupt": true}}}]
+    "replies": [{"session": {"ref": {"harnessInstance": "local", "sessionId": "same-id"}, "capabilities": {"canAnswer": true, "canInterrupt": true, "canPromptImage": true, "canPromptAudio": true}}}]
   },
   {
     "operation": "Send",
     "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "operationId": "send-1", "text": "  Check `$HOME` and \"a b\".\n\tThen stop.\n"},
     "replies": [{"receipt": {"operationId": "send-1", "status": "DELIVERY_STATUS_ACCEPTED"}}]
+  },
+  {
+    "operation": "Send",
+    "request": {"session": {"harnessInstance": "local", "sessionId": "same-id"}, "operationId": "send-media", "parts": [
+      {"text": "  Before\n"},
+      {"image": {"mimeType": "image/png", "data": "AAH/"}},
+      {"text": "\tBetween\n"},
+      {"audio": {"mimeType": "audio/wav", "data": "AgM="}},
+      {"text": "After  "}
+    ]},
+    "replies": [{"receipt": {"operationId": "send-media", "status": "DELIVERY_STATUS_ACCEPTED"}}]
   },
   {
     "operation": "Observe",

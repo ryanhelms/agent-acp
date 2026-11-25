@@ -65,8 +65,6 @@ type Config struct {
 	// SystemPromptAppend selects the standard ACP append mode when the peer
 	// advertises it. Provider-specific fallback can remain in SessionMeta.
 	SystemPromptAppend string
-	// ModelOnResume enforces an approved model before returning a resumed session.
-	ModelOnResume string
 	// ReadHistory reads native retained records without opening a live session.
 	ReadHistory func(context.Context, *model.ReadHistoryRequest) (*model.ReadHistoryResponse, error)
 	// ReplayHistory allows ReadHistory to load an inactive session in a

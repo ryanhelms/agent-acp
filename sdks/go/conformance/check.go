@@ -185,7 +185,10 @@ type pending struct {
 }
 
 func (p *pending) observe(item *model.Observation) error {
-	if !proto.Equal(item.GetSession(), p.ref) || item.GetTurnId() != p.id {
+	// ACP allows passive setup announcements before the first turn. They
+	// still carry a session-scoped cursor, but cannot satisfy a turn assertion.
+	setup := item.GetTurnId() == "" && item.GetExtension() != nil
+	if !proto.Equal(item.GetSession(), p.ref) || !setup && item.GetTurnId() != p.id {
 		return fmt.Errorf("%s received an observation addressed to another session or turn", p.id)
 	}
 	cursor := item.GetCursor()
@@ -219,6 +222,9 @@ func (s check) start(ref *model.SessionRef, id string) (*pending, error) {
 		}
 		if err := p.observe(item); err != nil {
 			return nil, err
+		}
+		if item.GetTurnId() == "" {
+			continue
 		}
 		text := item.GetText()
 		literal = literal || (text.GetSpeaker() == model.Speaker_SPEAKER_USER && text.GetText() == s.fixture.Prompt)

@@ -21,6 +21,14 @@ class Speaker(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SPEAKER_USER: _ClassVar[Speaker]
     SPEAKER_ASSISTANT: _ClassVar[Speaker]
     SPEAKER_SYSTEM: _ClassVar[Speaker]
+
+class WireMessageKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    WIRE_MESSAGE_KIND_UNSPECIFIED: _ClassVar[WireMessageKind]
+    WIRE_MESSAGE_KIND_REQUEST: _ClassVar[WireMessageKind]
+    WIRE_MESSAGE_KIND_NOTIFICATION: _ClassVar[WireMessageKind]
+    WIRE_MESSAGE_KIND_RESULT: _ClassVar[WireMessageKind]
+    WIRE_MESSAGE_KIND_ERROR: _ClassVar[WireMessageKind]
 DELIVERY_STATUS_UNSPECIFIED: DeliveryStatus
 DELIVERY_STATUS_ACCEPTED: DeliveryStatus
 DELIVERY_STATUS_DELIVERED: DeliveryStatus
@@ -30,6 +38,11 @@ SPEAKER_UNSPECIFIED: Speaker
 SPEAKER_USER: Speaker
 SPEAKER_ASSISTANT: Speaker
 SPEAKER_SYSTEM: Speaker
+WIRE_MESSAGE_KIND_UNSPECIFIED: WireMessageKind
+WIRE_MESSAGE_KIND_REQUEST: WireMessageKind
+WIRE_MESSAGE_KIND_NOTIFICATION: WireMessageKind
+WIRE_MESSAGE_KIND_RESULT: WireMessageKind
+WIRE_MESSAGE_KIND_ERROR: WireMessageKind
 
 class SessionRef(_message.Message):
     __slots__ = ("harness_instance", "session_id")
@@ -40,18 +53,22 @@ class SessionRef(_message.Message):
     def __init__(self, harness_instance: _Optional[str] = ..., session_id: _Optional[str] = ...) -> None: ...
 
 class Capabilities(_message.Message):
-    __slots__ = ("can_resume", "can_answer", "can_interrupt", "can_list_sessions", "can_read_history")
+    __slots__ = ("can_resume", "can_answer", "can_interrupt", "can_list_sessions", "can_read_history", "can_prompt_image", "can_prompt_audio")
     CAN_RESUME_FIELD_NUMBER: _ClassVar[int]
     CAN_ANSWER_FIELD_NUMBER: _ClassVar[int]
     CAN_INTERRUPT_FIELD_NUMBER: _ClassVar[int]
     CAN_LIST_SESSIONS_FIELD_NUMBER: _ClassVar[int]
     CAN_READ_HISTORY_FIELD_NUMBER: _ClassVar[int]
+    CAN_PROMPT_IMAGE_FIELD_NUMBER: _ClassVar[int]
+    CAN_PROMPT_AUDIO_FIELD_NUMBER: _ClassVar[int]
     can_resume: bool
     can_answer: bool
     can_interrupt: bool
     can_list_sessions: bool
     can_read_history: bool
-    def __init__(self, can_resume: _Optional[bool] = ..., can_answer: _Optional[bool] = ..., can_interrupt: _Optional[bool] = ..., can_list_sessions: _Optional[bool] = ..., can_read_history: _Optional[bool] = ...) -> None: ...
+    can_prompt_image: bool
+    can_prompt_audio: bool
+    def __init__(self, can_resume: _Optional[bool] = ..., can_answer: _Optional[bool] = ..., can_interrupt: _Optional[bool] = ..., can_list_sessions: _Optional[bool] = ..., can_read_history: _Optional[bool] = ..., can_prompt_image: _Optional[bool] = ..., can_prompt_audio: _Optional[bool] = ...) -> None: ...
 
 class Session(_message.Message):
     __slots__ = ("ref", "capabilities", "display_name")
@@ -102,14 +119,34 @@ class Receipt(_message.Message):
     def __init__(self, operation_id: _Optional[str] = ..., status: _Optional[_Union[DeliveryStatus, str]] = ..., detail: _Optional[str] = ...) -> None: ...
 
 class SendRequest(_message.Message):
-    __slots__ = ("session", "operation_id", "text")
+    __slots__ = ("session", "operation_id", "text", "parts")
     SESSION_FIELD_NUMBER: _ClassVar[int]
     OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
     TEXT_FIELD_NUMBER: _ClassVar[int]
+    PARTS_FIELD_NUMBER: _ClassVar[int]
     session: SessionRef
     operation_id: str
     text: str
-    def __init__(self, session: _Optional[_Union[SessionRef, _Mapping]] = ..., operation_id: _Optional[str] = ..., text: _Optional[str] = ...) -> None: ...
+    parts: _containers.RepeatedCompositeFieldContainer[PromptPart]
+    def __init__(self, session: _Optional[_Union[SessionRef, _Mapping]] = ..., operation_id: _Optional[str] = ..., text: _Optional[str] = ..., parts: _Optional[_Iterable[_Union[PromptPart, _Mapping]]] = ...) -> None: ...
+
+class PromptPart(_message.Message):
+    __slots__ = ("text", "image", "audio")
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    IMAGE_FIELD_NUMBER: _ClassVar[int]
+    AUDIO_FIELD_NUMBER: _ClassVar[int]
+    text: str
+    image: PromptMedia
+    audio: PromptMedia
+    def __init__(self, text: _Optional[str] = ..., image: _Optional[_Union[PromptMedia, _Mapping]] = ..., audio: _Optional[_Union[PromptMedia, _Mapping]] = ...) -> None: ...
+
+class PromptMedia(_message.Message):
+    __slots__ = ("mime_type", "data")
+    MIME_TYPE_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    mime_type: str
+    data: bytes
+    def __init__(self, mime_type: _Optional[str] = ..., data: _Optional[bytes] = ...) -> None: ...
 
 class SendResponse(_message.Message):
     __slots__ = ("receipt",)
@@ -221,8 +258,34 @@ class Extension(_message.Message):
     data: bytes
     def __init__(self, type: _Optional[str] = ..., media_type: _Optional[str] = ..., data: _Optional[bytes] = ...) -> None: ...
 
+class WireProvenance(_message.Message):
+    __slots__ = ("kind", "protocol_version", "method", "id_json", "additional_fields_json", "omitted_additional_fields_bytes", "omitted_id_bytes", "id_json_bytes", "additional_fields_json_bytes", "protocol_version_json_bytes", "omitted_protocol_version_bytes")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
+    METHOD_FIELD_NUMBER: _ClassVar[int]
+    ID_JSON_FIELD_NUMBER: _ClassVar[int]
+    ADDITIONAL_FIELDS_JSON_FIELD_NUMBER: _ClassVar[int]
+    OMITTED_ADDITIONAL_FIELDS_BYTES_FIELD_NUMBER: _ClassVar[int]
+    OMITTED_ID_BYTES_FIELD_NUMBER: _ClassVar[int]
+    ID_JSON_BYTES_FIELD_NUMBER: _ClassVar[int]
+    ADDITIONAL_FIELDS_JSON_BYTES_FIELD_NUMBER: _ClassVar[int]
+    PROTOCOL_VERSION_JSON_BYTES_FIELD_NUMBER: _ClassVar[int]
+    OMITTED_PROTOCOL_VERSION_BYTES_FIELD_NUMBER: _ClassVar[int]
+    kind: WireMessageKind
+    protocol_version: str
+    method: str
+    id_json: str
+    additional_fields_json: str
+    omitted_additional_fields_bytes: int
+    omitted_id_bytes: int
+    id_json_bytes: bytes
+    additional_fields_json_bytes: bytes
+    protocol_version_json_bytes: bytes
+    omitted_protocol_version_bytes: int
+    def __init__(self, kind: _Optional[_Union[WireMessageKind, str]] = ..., protocol_version: _Optional[str] = ..., method: _Optional[str] = ..., id_json: _Optional[str] = ..., additional_fields_json: _Optional[str] = ..., omitted_additional_fields_bytes: _Optional[int] = ..., omitted_id_bytes: _Optional[int] = ..., id_json_bytes: _Optional[bytes] = ..., additional_fields_json_bytes: _Optional[bytes] = ..., protocol_version_json_bytes: _Optional[bytes] = ..., omitted_protocol_version_bytes: _Optional[int] = ...) -> None: ...
+
 class Observation(_message.Message):
-    __slots__ = ("session", "cursor", "turn_id", "text", "tool", "input", "turn_ended", "gap", "extension")
+    __slots__ = ("session", "cursor", "turn_id", "text", "tool", "input", "turn_ended", "gap", "extension", "source_record", "source_cursor", "wire_provenance")
     SESSION_FIELD_NUMBER: _ClassVar[int]
     CURSOR_FIELD_NUMBER: _ClassVar[int]
     TURN_ID_FIELD_NUMBER: _ClassVar[int]
@@ -232,6 +295,9 @@ class Observation(_message.Message):
     TURN_ENDED_FIELD_NUMBER: _ClassVar[int]
     GAP_FIELD_NUMBER: _ClassVar[int]
     EXTENSION_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_RECORD_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_CURSOR_FIELD_NUMBER: _ClassVar[int]
+    WIRE_PROVENANCE_FIELD_NUMBER: _ClassVar[int]
     session: SessionRef
     cursor: str
     turn_id: str
@@ -241,7 +307,10 @@ class Observation(_message.Message):
     turn_ended: TurnEnded
     gap: HistoryGap
     extension: Extension
-    def __init__(self, session: _Optional[_Union[SessionRef, _Mapping]] = ..., cursor: _Optional[str] = ..., turn_id: _Optional[str] = ..., text: _Optional[_Union[TextUpdate, _Mapping]] = ..., tool: _Optional[_Union[ToolActivity, _Mapping]] = ..., input: _Optional[_Union[InputRequest, _Mapping]] = ..., turn_ended: _Optional[_Union[TurnEnded, _Mapping]] = ..., gap: _Optional[_Union[HistoryGap, _Mapping]] = ..., extension: _Optional[_Union[Extension, _Mapping]] = ...) -> None: ...
+    source_record: Extension
+    source_cursor: str
+    wire_provenance: WireProvenance
+    def __init__(self, session: _Optional[_Union[SessionRef, _Mapping]] = ..., cursor: _Optional[str] = ..., turn_id: _Optional[str] = ..., text: _Optional[_Union[TextUpdate, _Mapping]] = ..., tool: _Optional[_Union[ToolActivity, _Mapping]] = ..., input: _Optional[_Union[InputRequest, _Mapping]] = ..., turn_ended: _Optional[_Union[TurnEnded, _Mapping]] = ..., gap: _Optional[_Union[HistoryGap, _Mapping]] = ..., extension: _Optional[_Union[Extension, _Mapping]] = ..., source_record: _Optional[_Union[Extension, _Mapping]] = ..., source_cursor: _Optional[str] = ..., wire_provenance: _Optional[_Union[WireProvenance, _Mapping]] = ...) -> None: ...
 
 class ListSessionsRequest(_message.Message):
     __slots__ = ("harness_instance", "working_directory", "cursor", "limit")

@@ -3,6 +3,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,24 @@ type MCPServer struct {
 	Env           map[string]string
 }
 
+// ACPUpdate is an original ACP session/update paired with its portable observation.
+type ACPUpdate struct {
+	Session *model.SessionRef
+	TurnID  string
+	Cursor  string
+	Body    json.RawMessage
+	// Params is the complete original params object when a session/update
+	// supplies additional params or wire envelope fields. Body still addresses its update
+	// member, including an explicit null; both share callback-owned storage.
+	Params json.RawMessage
+	// ParamsSize is zero for ordinary updates. When a full sourced record
+	// exceeds the observation window, ParamsSize reports its original byte
+	// count, Params is nil, and the observation carries acp.source_omitted.
+	ParamsSize int
+	// Metadata of the same selected frame, owned by the callback.
+	WireProvenance *model.WireProvenance
+}
+
 // Config configures one harness instance. New starts processes on demand.
 // Command can be omitted for an instance that only serves native history.
 type Config struct {
@@ -38,6 +57,13 @@ type Config struct {
 	SessionMeta map[string]any
 	// ReadHistory reads native retained records without opening a live session.
 	ReadHistory func(context.Context, *model.ReadHistoryRequest) (*model.ReadHistoryResponse, error)
+	// ReplayHistory allows ReadHistory to load an inactive session in a
+	// disposable ACP process when a native ReadHistory function is absent.
+	ReplayHistory bool
+	// OnACPUpdate optionally hands accepted live updates to an application-owned
+	// source store. The callback runs in observation order and must return
+	// promptly without invoking the runtime. It owns the update body and ref.
+	OnACPUpdate func(ACPUpdate)
 }
 
 type Runtime struct {
@@ -153,14 +179,18 @@ func (r *Runtime) Unary(ctx context.Context, op string, req, dst proto.Message) 
 		if err := r.validate(q.Session); err != nil {
 			return err
 		}
-		if r.config.ReadHistory == nil {
+		if r.config.ReadHistory == nil && !r.config.ReplayHistory {
 			return errors.New("native history reader is unavailable for this harness")
 		}
 		ctx, cancel := context.WithCancel(ctx)
 		stop := context.AfterFunc(r.ctx, cancel)
 		defer stop()
 		defer cancel()
-		page, err := r.config.ReadHistory(ctx, q)
+		read := r.config.ReadHistory
+		if read == nil {
+			read = r.replayHistory
+		}
+		page, err := read(ctx, q)
 		if err != nil {
 			return err
 		}
@@ -249,7 +279,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		}
 	}
 	s := newSession()
-	p, init, err := r.connect(ctx, s.handle)
+	p, init, err := r.connect(ctx, s.handle, s.selectWire)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +338,7 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	s.p = p
 	s.cwd = cwd
 	s.info = info
+	s.wireSession.Store(&info.Ref.SessionId)
 	s.mu.Unlock()
 	r.mu.Lock()
 	current := r.sessions[id]

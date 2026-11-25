@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -53,7 +54,11 @@ func TestAdapterProcess(t *testing.T) {
 		}
 		switch row.Method {
 		case "initialize":
-			respond(row.ID, map[string]any{"protocolVersion": 1, "agentInfo": map[string]string{"name": "test"}, "agentCapabilities": map[string]any{"loadSession": os.Getenv("TEST_AGENT_ACP_NO_LOAD") != "yes", "sessionCapabilities": map[string]any{"list": map[string]any{}}}})
+			media := os.Getenv("TEST_AGENT_ACP_TEXT_ONLY") != "yes"
+			respond(row.ID, map[string]any{"protocolVersion": 1, "agentInfo": map[string]string{"name": "test"}, "agentCapabilities": map[string]any{
+				"loadSession": os.Getenv("TEST_AGENT_ACP_NO_LOAD") != "yes", "sessionCapabilities": map[string]any{"list": map[string]any{}},
+				"promptCapabilities": map[string]bool{"image": media, "audio": media},
+			}})
 		case "session/new":
 			var req struct {
 				Cwd        string
@@ -102,15 +107,24 @@ func TestAdapterProcess(t *testing.T) {
 			}
 			var req struct {
 				SessionID string
-				Prompt    []struct{ Text string }
+				Prompt    []map[string]string
 			}
 			json.Unmarshal(row.Params, &req)
 			if sessionID != req.SessionID {
 				os.Exit(4)
 			}
 			turn = row.ID
-			text := req.Prompt[0].Text
+			text := req.Prompt[0]["text"]
 			switch text {
+			case "  Media before\n":
+				if len(req.Prompt) != 5 || req.Prompt[1]["type"] != "image" || req.Prompt[1]["mimeType"] != "image/png" ||
+					req.Prompt[1]["data"] != "AAH/" || req.Prompt[2]["text"] != "\tBetween\n" ||
+					req.Prompt[3]["type"] != "audio" || req.Prompt[3]["mimeType"] != "audio/wav" ||
+					req.Prompt[3]["data"] != "AgM=" || req.Prompt[4]["text"] != "After  " {
+					os.Exit(14)
+				}
+				update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "media prompt verified"}})
+				respond(turn, map[string]string{"stopReason": "end_turn"})
 			case "wait":
 				update("agent_message_chunk", map[string]any{"content": map[string]string{"type": "text", "text": "waiting"}})
 			case "disconnect":
@@ -170,6 +184,70 @@ func TestAdapterProcess(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func TestMediaPromptUsesNegotiatedACPContentBlocks(t *testing.T) {
+	media := []*model.PromptPart{
+		{Content: &model.PromptPart_Text{Text: "  Media before\n"}},
+		{Content: &model.PromptPart_Image{Image: &model.PromptMedia{MimeType: "image/png", Data: []byte{0, 1, 255}}}},
+		{Content: &model.PromptPart_Text{Text: "\tBetween\n"}},
+		{Content: &model.PromptPart_Audio{Audio: &model.PromptMedia{MimeType: "audio/wav", Data: []byte{2, 3}}}},
+		{Content: &model.PromptPart_Text{Text: "After  "}},
+	}
+	t.Run("advertised", func(t *testing.T) {
+		_, client, ctx := newTestRuntime(t)
+		session, err := client.Open(ctx, &model.OpenRequest{HarnessInstance: "unit"})
+		if err != nil || !session.GetSession().GetCapabilities().GetCanPromptImage() || !session.GetSession().GetCapabilities().GetCanPromptAudio() {
+			t.Fatalf("prompt capabilities did not survive negotiation: %v, %v", session, err)
+		}
+		ref := session.GetSession().GetRef()
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "ambiguous", Text: "overlap", Parts: media}); err == nil {
+			t.Fatal("accepted a mixed legacy and ordered prompt")
+		}
+		invalid := []*model.PromptPart{{Content: &model.PromptPart_Image{Image: &model.PromptMedia{MimeType: "audio/wav", Data: []byte{1}}}}}
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "invalid", Parts: invalid}); err == nil {
+			t.Fatal("accepted an image with an audio MIME type")
+		}
+		req := &model.SendRequest{Session: ref, OperationId: "media", Parts: media}
+		sent, err := client.Send(ctx, req)
+		if err != nil || sent.GetReceipt().GetStatus() != model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED {
+			t.Fatalf("media prompt was not accepted: %v, %v", sent, err)
+		}
+		if _, err := client.Send(ctx, req); err != nil {
+			t.Fatalf("identical media prompt did not recover its receipt: %v", err)
+		}
+		observed := false
+		for event, err := range client.Observe(ctx, &model.ObserveRequest{Session: ref}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := event.GetText(); text.GetSpeaker() == model.Speaker_SPEAKER_USER &&
+				(!strings.Contains(text.GetText(), "[ACP image] image/png") || strings.Contains(text.GetText(), "AAH/")) {
+				t.Fatalf("incorrect prompt preview: %q", text.GetText())
+			}
+			if event.GetText().GetText() == "media prompt verified" {
+				observed = true
+			}
+			if event.GetTurnEnded() != nil {
+				break
+			}
+		}
+		if !observed {
+			t.Fatal("adapter did not confirm the ordered prompt")
+		}
+	})
+	t.Run("unavailable", func(t *testing.T) {
+		t.Setenv("TEST_AGENT_ACP_TEXT_ONLY", "yes")
+		_, client, ctx := newTestRuntime(t)
+		ref := opened(t, client, ctx)
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "unsupported", Parts: media}); err == nil ||
+			!strings.Contains(err.Error(), "does not support image prompts") {
+			t.Fatalf("unsupported prompt did not fail before dispatch: %v", err)
+		}
+		if _, err := client.Send(ctx, &model.SendRequest{Session: ref, OperationId: "plain", Text: "plain still works"}); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func newTestRuntime(t *testing.T) (*Runtime, *agentacp.Sessions, context.Context) {
@@ -427,6 +505,42 @@ func TestMCPRawResultProvidesTypedToolPreview(t *testing.T) {
 	}
 }
 
+func TestMCPFailuresPreservePartialOutputAndSource(t *testing.T) {
+	for _, test := range []struct {
+		name, fields, phase, summary string
+	}{
+		{"direct result", `"status":"completed","rawOutput":{"isError":true,"structuredContent":{"details":"original private detail"},"content":[{"type":"text","text":"Partial result"},{"type":"audio","mimeType":"audio/wav","data":"PRIVATE_AUDIO"}]}`,
+			"failed", "[Structured MCP result]\nPartial result\n[ACP audio] audio/wav"},
+		{"wrapped result", `"status":"completed","content":[{"type":"content","content":{"type":"text","text":"ACP partial result"}}],"rawOutput":{"result":{"isError":true,"content":[{"type":"text","text":"ACP partial result"}]}}`,
+			"failed", "ACP partial result"},
+		{"protocol failure", `"status":"completed","content":[{"type":"content","content":{"type":"text","text":"ACP partial result"}}],"rawOutput":{"error":{"code":-32603,"message":"Tool service disconnected","data":"PRIVATE_ERROR"}}`,
+			"failed", "Tool service disconnected\nACP partial result"},
+		{"cancelled ACP call", `"status":"cancelled","rawOutput":{"isError":true,"content":[{"type":"text","text":"Stopped"}]}`,
+			"cancelled", "Stopped"},
+		{"direct success", `"status":"completed","rawOutput":{"isError":false,"content":[{"type":"text","text":"MCP output"}]}`,
+			"completed", "MCP output"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"fixture",` + test.fields + "}")
+			tool := normalizeUpdate(raw).GetTool()
+			if tool.GetPhase() != test.phase || tool.GetSummary() != test.summary {
+				t.Fatalf("incorrect tool preview: %v", tool)
+			}
+			history := replayRecords(raw)
+			if len(history) != 2 || history[0].GetTool().GetPhase() != test.phase ||
+				history[0].GetTool().GetSummary() != test.summary || history[1].GetExtension().GetType() != ACPReplaySource {
+				t.Fatalf("replay diverged from the live preview or dropped the original record: %v", history)
+			}
+			original := history[1].GetExtension().GetData()
+			for _, marker := range []string{"original private detail", "PRIVATE_AUDIO", "PRIVATE_ERROR"} {
+				if bytes.Contains(raw, []byte(marker)) && !bytes.Contains(original, []byte(marker)) {
+					t.Fatalf("replay source omitted %q", marker)
+				}
+			}
+		})
+	}
+}
+
 func TestToolSummaryUsesDisplayContent(t *testing.T) {
 	raw := json.RawMessage(`{"sessionUpdate":"tool_call_update","toolCallId":"call-1","kind":"other","status":"completed","rawOutput":{"secret":"private peer metadata"},"content":[{"type":"content","content":{"type":"text","text":"Worker created."}},{"type":"diff","path":"README.md","newText":"not a preview"},{"type":"terminal","terminalId":"term-2"}]}`)
 	tool := normalizeUpdate(raw).GetTool()
@@ -438,7 +552,7 @@ func TestToolSummaryUsesDisplayContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolSummary(raw, nil, "other"); got != strings.Repeat("界", 1024)+"…" {
+	if got, _ := toolSummary(raw, nil, "other"); got != strings.Repeat("界", 1024)+"…" {
 		t.Fatal("invalid truncation length", len(got))
 	}
 }
@@ -451,7 +565,7 @@ func TestToolSummaryIncludesVisibleResourceDescriptors(t *testing.T) {
 		{"type":"content","content":{"type":"image","mimeType":"image/png","data":"BINARY_MARKER"}},
 		{"type":"content","content":{"type":"future_block","extra":"unknown"}}
 	]`)
-	got := toolSummary(raw, nil, "other")
+	got, _ := toolSummary(raw, nil, "other")
 	for _, part := range []string{"partial result", "plan.md fixture://plan text/markdown 0 bytes", "fixture://inline", "inline draft", "[ACP image] image/png", "[ACP content: future_block]"} {
 		if !strings.Contains(got, part) {
 			t.Fatalf("missing preview %q in %q", part, got)

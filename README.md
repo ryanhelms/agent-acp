@@ -45,7 +45,11 @@ Use `npm run generate -- --language typescript` to regenerate one binding. Subst
 
 The Protobuf service describes a callable API. The generated clients pass a typed request to an injected runtime and expose typed replies and observations to their callers. The runtime resolves the harness instance, negotiates capabilities, opens the provider connection and handles transport errors. ACP, a provider SDK and a native history reader can all sit behind that interface. A local adapter can execute in the consuming application's process.
 
+Use the existing `SendRequest.text` field for a plain prompt or `parts` for ordered text, inline images, and inline audio. The Go ACP runtime exposes the peer's image and audio capabilities on the opened session and rejects unavailable media before sending the prompt. User previews show media descriptors. The request carries binary data as Protobuf bytes. [ACP content blocks](https://agentclientprotocol.com/protocol/v1/content) · [ACP capability negotiation](https://agentclientprotocol.com/protocol/v1/initialization)
+
 Configure each Go runtime with a stable harness instance, an adapter command and arguments, and an absolute working directory. Pass it to `agentacp.New`. The adapter starts on demand. Register stdio MCP servers through `runtime.Config.MCPServers`. Set `OncePermissionsOnly` to restrict permission prompts to one-time decisions. The runnable example shows the complete call sequence. [Go example entry point](sdks/go/cmd/session-example/main.go)
+
+When an ACP update carries a direct MCP result or a JSON-RPC tool reply in `rawOutput`, the Go runtime keeps its failure status and available display content together. The preview marks structured results and attachments. The original fields are available to the scoped source hook and ACP replay. [MCP tool results](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#tool-result) · [ACP tool calls](https://agentclientprotocol.com/protocol/v1/tool-calls)
 
 | Operation | Go runtime behavior |
 | --- | --- |

@@ -29,6 +29,9 @@ type ACPUpdate struct {
 	TurnID  string
 	Cursor  string
 	Body    json.RawMessage
+	// SessionUpdate can be rendered immediately when no prompt turn is running.
+	SessionUpdate *model.SessionUpdate
+	Gap           string
 }
 
 // Config configures one harness instance. New starts processes on demand.
@@ -269,6 +272,9 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 		}
 	}
 	s := newSession()
+	if id == "" {
+		s.setup = make([]setupUpdate, 0, 8)
+	}
 	p, init, err := r.connect(ctx, s.handle)
 	if err != nil {
 		return nil, err
@@ -328,6 +334,21 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	s.p = p
 	s.cwd = cwd
 	s.info = info
+	for _, update := range s.setup {
+		if update.sessionID == id {
+			s.acceptUpdate(update.body)
+		}
+	}
+	if s.setupGap {
+		const reason = "Some ACP notifications during session setup exceeded the retained window"
+		s.emit(&model.Observation{Event: &model.Observation_Gap{Gap: &model.HistoryGap{
+			Reason: reason, SessionOnly: true,
+		}}})
+		if capture := p.runtime.config.OnACPUpdate; capture != nil {
+			capture(ACPUpdate{Session: proto.Clone(info.Ref).(*model.SessionRef), Gap: reason})
+		}
+	}
+	s.setup = nil
 	s.mu.Unlock()
 	r.mu.Lock()
 	current := r.sessions[id]

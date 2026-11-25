@@ -30,6 +30,8 @@ message Capabilities {
   bool can_interrupt = 3;
   bool can_list_sessions = 4;
   bool can_read_history = 5;
+  bool can_prompt_image = 6;
+  bool can_prompt_audio = 7;
 }
 
 message Session {
@@ -73,6 +75,19 @@ message SendRequest {
   string operation_id = 2;
   // Preserve whitespace and shell punctuation exactly.
   string text = 3;
+  // An ordered prompt. Use this or text, never both.
+  repeated PromptPart parts = 4;
+}
+message PromptPart {
+  oneof content {
+    string text = 1;
+    PromptMedia image = 2;
+    PromptMedia audio = 3;
+  }
+}
+message PromptMedia {
+  string mime_type = 1;
+  bytes data = 2;
 }
 message SendResponse {
   Receipt receipt = 1;
@@ -132,12 +147,106 @@ message TurnEnded {
 }
 message HistoryGap {
   string reason = 1;
+  bool session_only = 2;
 }
 message Extension {
   string type = 1;
   string media_type = 2;
   bytes data = 3;
 }
+
+// Provider-visible thought chunks and non-text message content. Original
+// media bytes and unfamiliar fields remain available from the scoped source.
+message MessageContent {
+  Speaker speaker = 1;
+  bool thought = 2;
+  string kind = 3;
+  string text = 4;
+  string uri = 5;
+  string mime_type = 6;
+  string name = 7;
+  string title = 8;
+  string description = 9;
+  optional int64 size = 10;
+}
+
+message PlanSnapshot {
+  message Entry {
+    string content = 1;
+    string priority = 2;
+    string status = 3;
+  }
+  repeated Entry entries = 1;
+}
+
+message AvailableCommands {
+  message Command {
+    string name = 1;
+    string description = 2;
+    optional string input_hint = 3;
+  }
+  repeated Command commands = 1;
+}
+
+message ModeChanged {
+  string mode_id = 1;
+}
+
+message ConfigurationSnapshot {
+  message Choice {
+    string value = 1;
+    string name = 2;
+    string description = 3;
+  }
+  message Group {
+    string id = 1;
+    string name = 2;
+    repeated Choice choices = 3;
+  }
+  message Option {
+    string id = 1;
+    string name = 2;
+    string description = 3;
+    string category = 4;
+    string kind = 5;
+    oneof current_value {
+      string selected = 6;
+      bool enabled = 7;
+    }
+    repeated Choice choices = 8;
+    repeated Group groups = 9;
+  }
+  repeated Option options = 1;
+}
+
+message SessionInfoChanged {
+  optional string title = 1;
+  optional string updated_at = 2;
+  bool clear_title = 3;
+  bool clear_updated_at = 4;
+}
+
+message UsageChanged {
+  int64 used = 1;
+  int64 size = 2;
+  message Cost {
+    double amount = 1;
+    string currency = 2;
+  }
+  Cost cost = 3;
+}
+
+message SessionUpdate {
+  oneof change {
+    PlanSnapshot plan = 1;
+    AvailableCommands commands = 2;
+    ModeChanged mode = 3;
+    ConfigurationSnapshot configuration = 4;
+    SessionInfoChanged info = 5;
+    UsageChanged usage = 6;
+  }
+}
+
 message Observation {
   SessionRef session = 1;
   string cursor = 2;
@@ -149,6 +258,8 @@ message Observation {
     TurnEnded turn_ended = 7;
     HistoryGap gap = 8;
     Extension extension = 9;
+    SessionUpdate session_update = 10;
+    MessageContent content = 11;
   }
 }
 

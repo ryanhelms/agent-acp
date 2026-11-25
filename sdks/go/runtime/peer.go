@@ -60,6 +60,7 @@ type handshake struct {
 	AgentCapabilities struct {
 		LoadSession         bool
 		SessionCapabilities struct{ List, Resume *empty }
+		PromptCapabilities  struct{ Image, Audio bool }
 	}
 }
 
@@ -159,7 +160,13 @@ func (p *peer) close() {
 }
 
 func (r *Runtime) capabilities(init handshake) *model.Capabilities {
-	return &model.Capabilities{CanResume: init.AgentCapabilities.LoadSession || init.AgentCapabilities.SessionCapabilities.Resume != nil, CanAnswer: true, CanInterrupt: true, CanReadHistory: r.config.ReadHistory != nil || (r.config.ReplayHistory && init.AgentCapabilities.LoadSession), CanListSessions: init.AgentCapabilities.SessionCapabilities.List != nil}
+	agent := init.AgentCapabilities
+	return &model.Capabilities{
+		CanResume: agent.LoadSession || agent.SessionCapabilities.Resume != nil,
+		CanAnswer: true, CanInterrupt: true, CanListSessions: agent.SessionCapabilities.List != nil,
+		CanReadHistory: r.config.ReadHistory != nil || (r.config.ReplayHistory && agent.LoadSession),
+		CanPromptImage: agent.PromptCapabilities.Image, CanPromptAudio: agent.PromptCapabilities.Audio,
+	}
 }
 
 func (r *Runtime) mcpServers() []map[string]any {

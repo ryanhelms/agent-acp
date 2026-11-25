@@ -30,6 +30,14 @@ type session struct {
 	windowBytes int
 	events      []*model.Observation
 	changed     chan struct{}
+	setup       []setupUpdate
+	setupBytes  int
+	setupGap    bool
+}
+
+type setupUpdate struct {
+	sessionID string
+	body      json.RawMessage
 }
 
 type turn struct {
@@ -91,15 +99,19 @@ func (s *session) send(q *model.SendRequest) (*model.Receipt, error) {
 	if s.turn != nil {
 		return nil, errors.New("session already has an active turn")
 	}
+	blocks, preview, err := promptBlocks(q, s.info.Capabilities)
+	if err != nil {
+		return nil, err
+	}
 	t := &turn{id: q.OperationId, written: s.p.readyPrompt(), done: make(chan struct{})}
 	s.turn = t
-	s.emit(&model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: model.Speaker_SPEAKER_USER, Text: q.Text}}})
+	s.emit(&model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: model.Speaker_SPEAKER_USER, Text: preview}}})
 	receipt := s.record(q.OperationId, q, model.DeliveryStatus_DELIVERY_STATUS_ACCEPTED, "turn accepted")
-	go s.prompt(t, q.Text)
+	go s.prompt(t, blocks)
 	return receipt, nil
 }
-func (s *session) prompt(t *turn, text string) {
-	params := map[string]any{"sessionId": s.info.Ref.SessionId, "prompt": []map[string]string{{"type": "text", "text": text}}}
+func (s *session) prompt(t *turn, blocks []map[string]string) {
+	params := map[string]any{"sessionId": s.info.Ref.SessionId, "prompt": blocks}
 	result, err := rpc[struct{ StopReason string }](s.p.runtime.ctx, s.p, "session/prompt", params)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,22 +218,39 @@ func (s *session) handle(ctx context.Context, method string, raw json.RawMessage
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		// Initial and resume/load replay notifications arrive before the session
-		// becomes live. Historical decisions are never registered as actionable.
-		if s.info != nil && msg.SessionID == s.info.Ref.SessionId && !s.closed {
-			if obs := normalizeUpdate(msg.Update); obs != nil {
-				s.emit(obs)
-				if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
-					ref := &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: s.info.Ref.SessionId}
-					capture(ACPUpdate{Session: ref, TurnID: obs.TurnId, Cursor: obs.Cursor, Body: append(json.RawMessage(nil), msg.Update...)})
-				}
+		if s.info == nil && s.setup != nil {
+			// Retain session/new notifications until the response verifies their
+			// session ID. Resume/load replay is handled by the passive reader.
+			if len(s.setup) >= 32 || s.setupBytes+len(msg.Update) > 1<<20 {
+				s.setupGap = true
+			} else {
+				s.setup = append(s.setup, setupUpdate{msg.SessionID, msg.Update})
+				s.setupBytes += len(msg.Update)
 			}
+		} else if s.info != nil && msg.SessionID == s.info.Ref.SessionId && !s.closed {
+			s.acceptUpdate(msg.Update)
 		}
 		return nil, nil
 	case "session/request_permission":
 		return s.requestPermission(ctx, raw)
 	default:
 		return nil, acp.NewMethodNotFound(method)
+	}
+}
+
+func (s *session) acceptUpdate(body json.RawMessage) {
+	observation := normalizeUpdate(body)
+	if observation == nil {
+		return
+	}
+	s.emit(observation)
+	if capture := s.p.runtime.config.OnACPUpdate; capture != nil {
+		ref := &model.SessionRef{HarnessInstance: s.info.Ref.HarnessInstance, SessionId: s.info.Ref.SessionId}
+		update := ACPUpdate{Session: ref, TurnID: observation.TurnId, Cursor: observation.Cursor, Body: append(json.RawMessage(nil), body...)}
+		if observation.TurnId == "" && observation.GetSessionUpdate() != nil {
+			update.SessionUpdate = proto.Clone(observation.GetSessionUpdate()).(*model.SessionUpdate)
+		}
+		capture(update)
 	}
 }
 
@@ -282,17 +311,20 @@ func normalizeUpdate(raw json.RawMessage) *model.Observation {
 		return nil
 	}
 	switch u.SessionUpdate {
-	case "agent_message_chunk", "user_message_chunk":
-		var part struct{ Type, Text string }
-		if json.Unmarshal(u.Content, &part) == nil && part.Type == "text" {
-			speaker := model.Speaker_SPEAKER_ASSISTANT
-			if u.SessionUpdate == "user_message_chunk" {
-				speaker = model.Speaker_SPEAKER_USER
-			}
-			return &model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: speaker, Text: part.Text}}}
+	case "agent_message_chunk", "user_message_chunk", "agent_thought_chunk":
+		speaker := model.Speaker_SPEAKER_ASSISTANT
+		if u.SessionUpdate == "user_message_chunk" {
+			speaker = model.Speaker_SPEAKER_USER
+		}
+		if observation := messageContent(u.Content, speaker, u.SessionUpdate == "agent_thought_chunk"); observation != nil {
+			return observation
 		}
 	case "tool_call", "tool_call_update":
 		phase := u.Status
+		summary, failed := toolSummary(u.Content, u.RawOutput, u.Kind)
+		if failed && (phase == "" || phase == "completed") {
+			phase = "failed"
+		}
 		if phase == "" {
 			phase = u.SessionUpdate
 		}
@@ -300,7 +332,11 @@ func normalizeUpdate(raw json.RawMessage) *model.Observation {
 		if name == "" {
 			name = u.Name
 		}
-		return &model.Observation{Event: &model.Observation_Tool{Tool: &model.ToolActivity{CallId: u.ToolCallID, Name: name, Phase: phase, Summary: toolSummary(u.Content, u.RawOutput, u.Kind)}}}
+		return &model.Observation{Event: &model.Observation_Tool{Tool: &model.ToolActivity{CallId: u.ToolCallID, Name: name, Phase: phase, Summary: summary}}}
+	case "plan", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update", "usage_update":
+		if change := sessionChange(raw); change != nil {
+			return &model.Observation{Event: &model.Observation_SessionUpdate{SessionUpdate: change}}
+		}
 	}
 	return &model.Observation{Event: &model.Observation_Extension{Extension: &model.Extension{Type: u.SessionUpdate, MediaType: "application/json", Data: raw}}}
 }
@@ -310,34 +346,60 @@ type toolContentBlock struct {
 	Content                json.RawMessage
 }
 
-// toolSummary prefers ACP display blocks. Some adapters carry an MCP result
-// only inside rawOutput. Its typed content is suitable for the same preview.
-func toolSummary(raw, rawOutput json.RawMessage, kind string) string {
+type mcpToolResult struct {
+	Content           []json.RawMessage
+	StructuredContent json.RawMessage
+	IsError           bool
+}
+
+// toolSummary keeps ACP display content and takes failure evidence from either
+// a direct MCP result or a JSON-RPC reply carried by the adapter in rawOutput.
+func toolSummary(raw, rawOutput json.RawMessage, kind string) (string, bool) {
 	var blocks []toolContentBlock
+	var summary string
 	if json.Unmarshal(raw, &blocks) == nil {
-		if summary := formatToolBlocks(blocks); summary != "" {
-			return summary
-		}
+		summary = formatToolBlocks(blocks)
 	}
 	var output struct {
-		Result *struct{ Content []json.RawMessage }
-		Error  *struct{ Message string }
+		mcpToolResult
+		Result *mcpToolResult
+		Error  *struct {
+			Code    *int
+			Message string
+		}
 	}
+	var prefix []string
+	var failed bool
 	if json.Unmarshal(rawOutput, &output) == nil {
-		if output.Result != nil {
-			blocks = make([]toolContentBlock, 0, len(output.Result.Content))
-			for _, part := range output.Result.Content {
+		result := output.Result
+		if result == nil {
+			result = &output.mcpToolResult
+		}
+		failed = result.IsError
+		if output.Error != nil {
+			failed = failed || output.Error.Code != nil
+			if output.Error.Message != "" && (summary == "" || output.Error.Code != nil) {
+				prefix = append(prefix, output.Error.Message)
+			}
+		}
+		if len(result.StructuredContent) != 0 && result.StructuredContent[0] == '{' {
+			prefix = append(prefix, "[Structured MCP result]")
+		}
+		if summary == "" {
+			blocks = make([]toolContentBlock, 0, len(result.Content))
+			for _, part := range result.Content {
 				blocks = append(blocks, toolContentBlock{Type: "content", Content: part})
 			}
-			if summary := formatToolBlocks(blocks); summary != "" {
-				return summary
-			}
-		}
-		if output.Error != nil && output.Error.Message != "" {
-			return boundedToolText(output.Error.Message)
+			summary = formatToolBlocks(blocks)
 		}
 	}
-	return kind
+	if summary != "" {
+		prefix = append(prefix, summary)
+	}
+	if len(prefix) == 0 {
+		return kind, failed
+	}
+	return boundedToolText(strings.Join(prefix, "\n")), failed
 }
 
 func boundedToolText(text string) string {

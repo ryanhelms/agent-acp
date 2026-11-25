@@ -55,6 +55,8 @@ type Config struct {
 	OncePermissionsOnly bool
 	// SessionMeta supplies optional adapter setup metadata on creation and resume.
 	SessionMeta map[string]any
+	// ModelOnResume enforces an approved model before returning a resumed session.
+	ModelOnResume string
 	// ReadHistory reads native retained records without opening a live session.
 	ReadHistory func(context.Context, *model.ReadHistoryRequest) (*model.ReadHistoryResponse, error)
 	// ReplayHistory allows ReadHistory to load an inactive session in a
@@ -319,9 +321,12 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 			method = "session/resume"
 		}
 		params["sessionId"] = id
-		if _, err := rpc[empty](ctx, p, method, params); err != nil {
+		resp, err := rpc[struct{ ConfigOptions []json.RawMessage }](ctx, p, method, params)
+		if err != nil {
 			return nil, err
 		}
+		configOptions = resp.ConfigOptions
+		modelID = r.config.ModelOnResume
 	}
 	info := &model.Session{Ref: &model.SessionRef{HarnessInstance: r.config.HarnessInstance, SessionId: id}, Capabilities: caps, DisplayName: init.AgentInfo.Name}
 	s.mu.Lock()
@@ -330,12 +335,12 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	s.info = info
 	s.wireSession.Store(&info.Ref.SessionId)
 	s.mu.Unlock()
-	if creating {
-		if modelID != "" {
-			if err := selectModel(ctx, p, id, modelID, configOptions); err != nil {
-				return nil, fmt.Errorf("select model: %w", err)
-			}
+	if modelID != "" {
+		if err := selectModel(ctx, p, id, modelID, configOptions); err != nil {
+			return nil, fmt.Errorf("select model: %w", err)
 		}
+	}
+	if creating {
 		if err := s.finishSetup(); err != nil {
 			return nil, err
 		}

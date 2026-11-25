@@ -31,6 +31,7 @@ type peer struct {
 	conn    *transport.Connection
 	exited  chan struct{}
 	once    sync.Once
+	version int
 	// Observe completion of the prompt write so session/cancel cannot overtake it.
 	writeMu    sync.Mutex
 	nextPrompt chan struct{}
@@ -60,10 +61,17 @@ func (p *peer) readyPrompt() <-chan struct{} {
 type handshake struct {
 	ProtocolVersion   int
 	AgentInfo         struct{ Name string }
+	Info              struct{ Name string }
 	AgentCapabilities struct {
 		LoadSession         bool
 		SessionCapabilities struct{ List, Resume *empty }
 		PromptCapabilities  struct{ Image, Audio bool }
+	}
+	Capabilities struct {
+		Session *struct {
+			Prompt struct{ Image, Audio *empty }
+			MCP    struct{ Stdio *empty }
+		}
 	}
 }
 
@@ -150,16 +158,39 @@ func (r *Runtime) connectWithOptions(ctx context.Context, handle transport.Metho
 	r.peers[p] = true
 	r.mu.Unlock()
 	go func() { _ = cmd.Wait(); close(p.exited) }()
-	init, err = rpc[handshake](ctx, p, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]string{"name": "agent-acp", "version": "1"}, "clientCapabilities": empty{}})
+	version := r.config.ProtocolVersion
+	if version == 0 {
+		version = 1
+	}
+	init, err = rpc[handshake](ctx, p, "initialize", initializeParams(version))
 	if err != nil {
 		p.close()
 		return nil, init, err
 	}
-	if init.ProtocolVersion != 1 {
+	if init.ProtocolVersion < 1 || init.ProtocolVersion > version {
 		p.close()
 		return nil, init, fmt.Errorf("unsupported ACP protocol version %d", init.ProtocolVersion)
 	}
+	if version == 2 && init.ProtocolVersion == 1 {
+		init, err = rpc[handshake](ctx, p, "initialize", initializeParams(1))
+		if err != nil || init.ProtocolVersion != 1 {
+			p.close()
+			if err != nil {
+				return nil, init, err
+			}
+			return nil, init, fmt.Errorf("adapter selected ACP %d when finalizing v1 negotiation", init.ProtocolVersion)
+		}
+	}
+	p.version = init.ProtocolVersion
 	return p, init, nil
+}
+
+func initializeParams(version int) map[string]any {
+	info := map[string]string{"name": "agent-acp", "version": "1"}
+	if version == 2 {
+		return map[string]any{"protocolVersion": version, "info": info, "capabilities": empty{}}
+	}
+	return map[string]any{"protocolVersion": version, "clientInfo": info, "clientCapabilities": empty{}}
 }
 
 func (p *peer) disconnected() bool {
@@ -188,6 +219,17 @@ func (p *peer) close() {
 }
 
 func (r *Runtime) capabilities(init handshake) *model.Capabilities {
+	if init.ProtocolVersion == 2 {
+		session := init.Capabilities.Session
+		if session == nil {
+			return &model.Capabilities{}
+		}
+		return &model.Capabilities{
+			CanAnswer: true, CanInterrupt: true, CanResume: true, CanListSessions: true,
+			CanReadHistory: r.config.ReadHistory != nil || r.config.ReplayHistory,
+			CanPromptImage: session.Prompt.Image != nil, CanPromptAudio: session.Prompt.Audio != nil,
+		}
+	}
 	agent := init.AgentCapabilities
 	return &model.Capabilities{
 		CanResume: agent.LoadSession || agent.SessionCapabilities.Resume != nil,
@@ -197,7 +239,7 @@ func (r *Runtime) capabilities(init handshake) *model.Capabilities {
 	}
 }
 
-func (r *Runtime) mcpServers() []map[string]any {
+func (r *Runtime) mcpServers(version int) []map[string]any {
 	out := make([]map[string]any, 0, len(r.config.MCPServers))
 	for _, server := range r.config.MCPServers {
 		names := make([]string, 0, len(server.Env))
@@ -209,7 +251,11 @@ func (r *Runtime) mcpServers() []map[string]any {
 		for _, name := range names {
 			env = append(env, map[string]string{"name": name, "value": server.Env[name]})
 		}
-		out = append(out, map[string]any{"name": server.Name, "command": server.Command, "args": append([]string{}, server.Args...), "env": env})
+		entry := map[string]any{"name": server.Name, "command": server.Command, "args": append([]string{}, server.Args...), "env": env}
+		if version == 2 {
+			entry["type"] = "stdio"
+		}
+		out = append(out, entry)
 	}
 	return out
 }

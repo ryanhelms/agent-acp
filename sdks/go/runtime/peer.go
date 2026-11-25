@@ -266,22 +266,26 @@ func (r *Runtime) mcpServers(s *session, p *peer, init handshake) ([]map[string]
 		if v2 && init.Capabilities.Session.MCP.Stdio == nil {
 			return nil, errors.New("adapter does not advertise the configured MCP server transport")
 		}
-		names := make([]string, 0, len(server.Env))
-		for n := range server.Env {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		env := make([]map[string]string, 0, len(names))
-		for _, name := range names {
-			env = append(env, map[string]string{"name": name, "value": server.Env[name]})
-		}
-		entry := map[string]any{"name": server.Name, "command": server.Command, "args": append([]string{}, server.Args...), "env": env}
-		if v2 {
-			entry["type"] = "stdio"
-		}
-		out = append(out, entry)
+		out = append(out, stdioServerParams(server, p.version))
 	}
 	return out, nil
+}
+
+func stdioServerParams(server MCPServer, version int) map[string]any {
+	names := make([]string, 0, len(server.Env))
+	for n := range server.Env {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	env := make([]map[string]string, 0, len(names))
+	for _, name := range names {
+		env = append(env, map[string]string{"name": name, "value": server.Env[name]})
+	}
+	entry := map[string]any{"name": server.Name, "command": server.Command, "args": append([]string{}, server.Args...), "env": env}
+	if version == 2 {
+		entry["type"] = "stdio"
+	}
+	return entry
 }
 
 type pageCursor struct {

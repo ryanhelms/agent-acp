@@ -79,6 +79,32 @@ type Config struct {
 	OnACPUpdate func(ACPUpdate)
 }
 
+// SessionSetupParams builds the deterministic stdio setup bound by a local
+// broker. Dynamic MCP-over-ACP registrations are dispatched by Runtime.
+func (config Config) SessionSetupParams(cwd string, version int, standardPrompt bool) map[string]any {
+	servers := make([]map[string]any, 0, len(config.MCPServers))
+	for _, server := range config.MCPServers {
+		servers = append(servers, stdioServerParams(server, version))
+	}
+	return config.sessionSetupParams(cwd, servers, standardPrompt)
+}
+
+func (config Config) sessionSetupParams(cwd string, servers []map[string]any, standardPrompt bool) map[string]any {
+	params := map[string]any{"cwd": cwd, "mcpServers": servers}
+	meta := config.SessionMeta
+	if standardPrompt && config.SystemPromptAppend != "" {
+		params["systemPrompt"] = map[string]any{
+			"mode": "append", "content": []map[string]string{{"type": "text", "text": config.SystemPromptAppend}},
+		}
+		meta = maps.Clone(meta)
+		delete(meta, "systemPrompt")
+	}
+	if len(meta) != 0 {
+		params["_meta"] = meta
+	}
+	return params
+}
+
 type Runtime struct {
 	config   Config
 	ctx      context.Context
@@ -340,20 +366,9 @@ func (r *Runtime) attach(ctx context.Context, id, cwd, modelID string) (*model.S
 	if err != nil {
 		return nil, err
 	}
-	params := map[string]any{"cwd": cwd, "mcpServers": servers}
-	meta := r.config.SessionMeta
 	standardPrompt := init.AgentCapabilities.SessionCapabilities.SystemPrompt != nil ||
 		v2 && init.Capabilities.Session.SystemPrompt != nil
-	if standardPrompt && r.config.SystemPromptAppend != "" {
-		params["systemPrompt"] = map[string]any{
-			"mode": "append", "content": []map[string]string{{"type": "text", "text": r.config.SystemPromptAppend}},
-		}
-		meta = maps.Clone(meta)
-		delete(meta, "systemPrompt")
-	}
-	if len(meta) != 0 {
-		params["_meta"] = meta
-	}
+	params := r.config.sessionSetupParams(cwd, servers, standardPrompt)
 	creating := id == ""
 	var configOptions []json.RawMessage
 	if creating || v2 {

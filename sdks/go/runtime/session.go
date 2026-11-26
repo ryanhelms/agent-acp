@@ -519,14 +519,17 @@ func normalizeUpdate(raw json.RawMessage) *model.Observation {
 		return nil
 	}
 	switch u.SessionUpdate {
-	case "agent_message_chunk", "user_message_chunk":
-		var part struct{ Type, Text string }
-		if json.Unmarshal(u.Content, &part) == nil && part.Type == "text" {
-			speaker := model.Speaker_SPEAKER_ASSISTANT
-			if u.SessionUpdate == "user_message_chunk" {
-				speaker = model.Speaker_SPEAKER_USER
-			}
-			return &model.Observation{Event: &model.Observation_Text{Text: &model.TextUpdate{Speaker: speaker, Text: part.Text}}}
+	case "agent_message_chunk", "user_message_chunk", "agent_thought_chunk":
+		speaker := model.Speaker_SPEAKER_ASSISTANT
+		if u.SessionUpdate == "user_message_chunk" {
+			speaker = model.Speaker_SPEAKER_USER
+		}
+		if observation := messageContent(u.Content, speaker, u.SessionUpdate == "agent_thought_chunk"); observation != nil {
+			return observation
+		}
+	case "plan", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update", "usage_update":
+		if change := sessionChange(raw); change != nil {
+			return &model.Observation{Event: &model.Observation_SessionUpdate{SessionUpdate: change}}
 		}
 	case "tool_call", "tool_call_update":
 		phase := u.Status

@@ -78,7 +78,7 @@ func TestUpdateParamsIsolationAndCallbackOwnership(t *testing.T) {
 		t.Fatal("out-of-scope or ambiguous notification escaped")
 	}
 
-	inner := `{"sessionUpdate":"plan","entries":[],"text":"a \"nested\" brace } [ and backslash \\"}`
+	inner := `{"sessionUpdate":"vendor_future_update","entries":[],"text":"a \"nested\" brace } [ and backslash \\"}`
 	enriched := "  { \"upda\\u0074e\" : " + inner + " , \"future\" : [false,2,{\"id\":null}], \"_me\\u0074a\": null, \"sessionId\" : \"cho\\u0073en\"    } \n"
 	_, err := s.handle(context.Background(), "session/update", json.RawMessage(enriched))
 	if err != nil || len(callbacks) != 1 {

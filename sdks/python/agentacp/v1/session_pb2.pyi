@@ -286,6 +286,156 @@ class Extension(_message.Message):
     data: bytes
     def __init__(self, type: _Optional[str] = ..., media_type: _Optional[str] = ..., data: _Optional[bytes] = ...) -> None: ...
 
+class MessageContent(_message.Message):
+    __slots__ = ("speaker", "thought", "kind", "text", "uri", "mime_type", "name", "title", "description", "size")
+    SPEAKER_FIELD_NUMBER: _ClassVar[int]
+    THOUGHT_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    URI_FIELD_NUMBER: _ClassVar[int]
+    MIME_TYPE_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    speaker: Speaker
+    thought: bool
+    kind: str
+    text: str
+    uri: str
+    mime_type: str
+    name: str
+    title: str
+    description: str
+    size: int
+    def __init__(self, speaker: _Optional[_Union[Speaker, str]] = ..., thought: _Optional[bool] = ..., kind: _Optional[str] = ..., text: _Optional[str] = ..., uri: _Optional[str] = ..., mime_type: _Optional[str] = ..., name: _Optional[str] = ..., title: _Optional[str] = ..., description: _Optional[str] = ..., size: _Optional[int] = ...) -> None: ...
+
+class PlanSnapshot(_message.Message):
+    __slots__ = ("entries",)
+    class Entry(_message.Message):
+        __slots__ = ("content", "priority", "status")
+        CONTENT_FIELD_NUMBER: _ClassVar[int]
+        PRIORITY_FIELD_NUMBER: _ClassVar[int]
+        STATUS_FIELD_NUMBER: _ClassVar[int]
+        content: str
+        priority: str
+        status: str
+        def __init__(self, content: _Optional[str] = ..., priority: _Optional[str] = ..., status: _Optional[str] = ...) -> None: ...
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    entries: _containers.RepeatedCompositeFieldContainer[PlanSnapshot.Entry]
+    def __init__(self, entries: _Optional[_Iterable[_Union[PlanSnapshot.Entry, _Mapping]]] = ...) -> None: ...
+
+class AvailableCommands(_message.Message):
+    __slots__ = ("commands",)
+    class Command(_message.Message):
+        __slots__ = ("name", "description", "input_hint")
+        NAME_FIELD_NUMBER: _ClassVar[int]
+        DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
+        INPUT_HINT_FIELD_NUMBER: _ClassVar[int]
+        name: str
+        description: str
+        input_hint: str
+        def __init__(self, name: _Optional[str] = ..., description: _Optional[str] = ..., input_hint: _Optional[str] = ...) -> None: ...
+    COMMANDS_FIELD_NUMBER: _ClassVar[int]
+    commands: _containers.RepeatedCompositeFieldContainer[AvailableCommands.Command]
+    def __init__(self, commands: _Optional[_Iterable[_Union[AvailableCommands.Command, _Mapping]]] = ...) -> None: ...
+
+class ModeChanged(_message.Message):
+    __slots__ = ("mode_id",)
+    MODE_ID_FIELD_NUMBER: _ClassVar[int]
+    mode_id: str
+    def __init__(self, mode_id: _Optional[str] = ...) -> None: ...
+
+class ConfigurationSnapshot(_message.Message):
+    __slots__ = ("options",)
+    class Choice(_message.Message):
+        __slots__ = ("value", "name", "description")
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        NAME_FIELD_NUMBER: _ClassVar[int]
+        DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
+        value: str
+        name: str
+        description: str
+        def __init__(self, value: _Optional[str] = ..., name: _Optional[str] = ..., description: _Optional[str] = ...) -> None: ...
+    class Group(_message.Message):
+        __slots__ = ("id", "name", "choices")
+        ID_FIELD_NUMBER: _ClassVar[int]
+        NAME_FIELD_NUMBER: _ClassVar[int]
+        CHOICES_FIELD_NUMBER: _ClassVar[int]
+        id: str
+        name: str
+        choices: _containers.RepeatedCompositeFieldContainer[ConfigurationSnapshot.Choice]
+        def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., choices: _Optional[_Iterable[_Union[ConfigurationSnapshot.Choice, _Mapping]]] = ...) -> None: ...
+    class Option(_message.Message):
+        __slots__ = ("id", "name", "description", "category", "kind", "selected", "enabled", "choices", "groups")
+        ID_FIELD_NUMBER: _ClassVar[int]
+        NAME_FIELD_NUMBER: _ClassVar[int]
+        DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
+        CATEGORY_FIELD_NUMBER: _ClassVar[int]
+        KIND_FIELD_NUMBER: _ClassVar[int]
+        SELECTED_FIELD_NUMBER: _ClassVar[int]
+        ENABLED_FIELD_NUMBER: _ClassVar[int]
+        CHOICES_FIELD_NUMBER: _ClassVar[int]
+        GROUPS_FIELD_NUMBER: _ClassVar[int]
+        id: str
+        name: str
+        description: str
+        category: str
+        kind: str
+        selected: str
+        enabled: bool
+        choices: _containers.RepeatedCompositeFieldContainer[ConfigurationSnapshot.Choice]
+        groups: _containers.RepeatedCompositeFieldContainer[ConfigurationSnapshot.Group]
+        def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., description: _Optional[str] = ..., category: _Optional[str] = ..., kind: _Optional[str] = ..., selected: _Optional[str] = ..., enabled: _Optional[bool] = ..., choices: _Optional[_Iterable[_Union[ConfigurationSnapshot.Choice, _Mapping]]] = ..., groups: _Optional[_Iterable[_Union[ConfigurationSnapshot.Group, _Mapping]]] = ...) -> None: ...
+    OPTIONS_FIELD_NUMBER: _ClassVar[int]
+    options: _containers.RepeatedCompositeFieldContainer[ConfigurationSnapshot.Option]
+    def __init__(self, options: _Optional[_Iterable[_Union[ConfigurationSnapshot.Option, _Mapping]]] = ...) -> None: ...
+
+class SessionInfoChanged(_message.Message):
+    __slots__ = ("title", "updated_at", "clear_title", "clear_updated_at")
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    CLEAR_TITLE_FIELD_NUMBER: _ClassVar[int]
+    CLEAR_UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    title: str
+    updated_at: str
+    clear_title: bool
+    clear_updated_at: bool
+    def __init__(self, title: _Optional[str] = ..., updated_at: _Optional[str] = ..., clear_title: _Optional[bool] = ..., clear_updated_at: _Optional[bool] = ...) -> None: ...
+
+class UsageChanged(_message.Message):
+    __slots__ = ("used", "size", "cost")
+    class Cost(_message.Message):
+        __slots__ = ("amount", "currency")
+        AMOUNT_FIELD_NUMBER: _ClassVar[int]
+        CURRENCY_FIELD_NUMBER: _ClassVar[int]
+        amount: float
+        currency: str
+        def __init__(self, amount: _Optional[float] = ..., currency: _Optional[str] = ...) -> None: ...
+    USED_FIELD_NUMBER: _ClassVar[int]
+    SIZE_FIELD_NUMBER: _ClassVar[int]
+    COST_FIELD_NUMBER: _ClassVar[int]
+    used: int
+    size: int
+    cost: UsageChanged.Cost
+    def __init__(self, used: _Optional[int] = ..., size: _Optional[int] = ..., cost: _Optional[_Union[UsageChanged.Cost, _Mapping]] = ...) -> None: ...
+
+class SessionUpdate(_message.Message):
+    __slots__ = ("plan", "commands", "mode", "configuration", "info", "usage")
+    PLAN_FIELD_NUMBER: _ClassVar[int]
+    COMMANDS_FIELD_NUMBER: _ClassVar[int]
+    MODE_FIELD_NUMBER: _ClassVar[int]
+    CONFIGURATION_FIELD_NUMBER: _ClassVar[int]
+    INFO_FIELD_NUMBER: _ClassVar[int]
+    USAGE_FIELD_NUMBER: _ClassVar[int]
+    plan: PlanSnapshot
+    commands: AvailableCommands
+    mode: ModeChanged
+    configuration: ConfigurationSnapshot
+    info: SessionInfoChanged
+    usage: UsageChanged
+    def __init__(self, plan: _Optional[_Union[PlanSnapshot, _Mapping]] = ..., commands: _Optional[_Union[AvailableCommands, _Mapping]] = ..., mode: _Optional[_Union[ModeChanged, _Mapping]] = ..., configuration: _Optional[_Union[ConfigurationSnapshot, _Mapping]] = ..., info: _Optional[_Union[SessionInfoChanged, _Mapping]] = ..., usage: _Optional[_Union[UsageChanged, _Mapping]] = ...) -> None: ...
+
 class WireProvenance(_message.Message):
     __slots__ = ("kind", "protocol_version", "method", "id_json", "additional_fields_json", "omitted_additional_fields_bytes", "omitted_id_bytes", "id_json_bytes", "additional_fields_json_bytes", "protocol_version_json_bytes", "omitted_protocol_version_bytes")
     KIND_FIELD_NUMBER: _ClassVar[int]
@@ -313,7 +463,7 @@ class WireProvenance(_message.Message):
     def __init__(self, kind: _Optional[_Union[WireMessageKind, str]] = ..., protocol_version: _Optional[str] = ..., method: _Optional[str] = ..., id_json: _Optional[str] = ..., additional_fields_json: _Optional[str] = ..., omitted_additional_fields_bytes: _Optional[int] = ..., omitted_id_bytes: _Optional[int] = ..., id_json_bytes: _Optional[bytes] = ..., additional_fields_json_bytes: _Optional[bytes] = ..., protocol_version_json_bytes: _Optional[bytes] = ..., omitted_protocol_version_bytes: _Optional[int] = ...) -> None: ...
 
 class Observation(_message.Message):
-    __slots__ = ("session", "cursor", "turn_id", "text", "tool", "input", "turn_ended", "gap", "extension", "source_record", "source_cursor", "wire_provenance")
+    __slots__ = ("session", "cursor", "turn_id", "text", "tool", "input", "turn_ended", "gap", "extension", "session_update", "content", "source_record", "source_cursor", "wire_provenance")
     SESSION_FIELD_NUMBER: _ClassVar[int]
     CURSOR_FIELD_NUMBER: _ClassVar[int]
     TURN_ID_FIELD_NUMBER: _ClassVar[int]
@@ -323,6 +473,8 @@ class Observation(_message.Message):
     TURN_ENDED_FIELD_NUMBER: _ClassVar[int]
     GAP_FIELD_NUMBER: _ClassVar[int]
     EXTENSION_FIELD_NUMBER: _ClassVar[int]
+    SESSION_UPDATE_FIELD_NUMBER: _ClassVar[int]
+    CONTENT_FIELD_NUMBER: _ClassVar[int]
     SOURCE_RECORD_FIELD_NUMBER: _ClassVar[int]
     SOURCE_CURSOR_FIELD_NUMBER: _ClassVar[int]
     WIRE_PROVENANCE_FIELD_NUMBER: _ClassVar[int]
@@ -335,10 +487,12 @@ class Observation(_message.Message):
     turn_ended: TurnEnded
     gap: HistoryGap
     extension: Extension
+    session_update: SessionUpdate
+    content: MessageContent
     source_record: Extension
     source_cursor: str
     wire_provenance: WireProvenance
-    def __init__(self, session: _Optional[_Union[SessionRef, _Mapping]] = ..., cursor: _Optional[str] = ..., turn_id: _Optional[str] = ..., text: _Optional[_Union[TextUpdate, _Mapping]] = ..., tool: _Optional[_Union[ToolActivity, _Mapping]] = ..., input: _Optional[_Union[InputRequest, _Mapping]] = ..., turn_ended: _Optional[_Union[TurnEnded, _Mapping]] = ..., gap: _Optional[_Union[HistoryGap, _Mapping]] = ..., extension: _Optional[_Union[Extension, _Mapping]] = ..., source_record: _Optional[_Union[Extension, _Mapping]] = ..., source_cursor: _Optional[str] = ..., wire_provenance: _Optional[_Union[WireProvenance, _Mapping]] = ...) -> None: ...
+    def __init__(self, session: _Optional[_Union[SessionRef, _Mapping]] = ..., cursor: _Optional[str] = ..., turn_id: _Optional[str] = ..., text: _Optional[_Union[TextUpdate, _Mapping]] = ..., tool: _Optional[_Union[ToolActivity, _Mapping]] = ..., input: _Optional[_Union[InputRequest, _Mapping]] = ..., turn_ended: _Optional[_Union[TurnEnded, _Mapping]] = ..., gap: _Optional[_Union[HistoryGap, _Mapping]] = ..., extension: _Optional[_Union[Extension, _Mapping]] = ..., session_update: _Optional[_Union[SessionUpdate, _Mapping]] = ..., content: _Optional[_Union[MessageContent, _Mapping]] = ..., source_record: _Optional[_Union[Extension, _Mapping]] = ..., source_cursor: _Optional[str] = ..., wire_provenance: _Optional[_Union[WireProvenance, _Mapping]] = ...) -> None: ...
 
 class ListSessionsRequest(_message.Message):
     __slots__ = ("harness_instance", "working_directory", "cursor", "limit")

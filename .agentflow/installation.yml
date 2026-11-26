@@ -1,0 +1,4 @@
+version: 1
+existing:
+    - AGENTS.md
+agent_separator: 1

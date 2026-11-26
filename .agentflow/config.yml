@@ -32,6 +32,11 @@ task_management:
   provider: "github-issues"
 
 # Task worktrees: `agentflow start <issue> --worktree` creates <root>/<repo>/<branch>.
+worktree:
+  go_work: # the SDK imports agent-acp-transport from its develop checkout or task worktree
+    use: ["sdks/go"]
+    siblings:
+      agent-acp.local/transport: {repo: agent-acp-transport, path: .}
 # worktree:
 #   root: ~/.worktrees
 #   go_work:                     # write a git-excluded go.work into each worktree
